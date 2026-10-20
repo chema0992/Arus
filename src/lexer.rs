@@ -32,6 +32,7 @@ impl Lexer {
             "script" => Token::Script,
             "fn" => Token::Fn,
             "let" => Token::Let,
+            "return" => Token::Return,
             _ => Token::Ident(text),
         }
     }

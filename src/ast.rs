@@ -23,6 +23,9 @@ pub enum Stmt {
         ty: Option<Type>,
         value: Expr,
     },
+
+
+    Return(Expr),
 }
 
 #[derive(Debug)]

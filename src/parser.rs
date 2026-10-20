@@ -83,6 +83,7 @@ impl Parser {
     fn parse_statement(&mut self) -> Stmt {
         match self.peek() {
             Token::Let => self.parse_let(),
+            Token::Return => self.parse_return(),
             _ => panic!("ERR: 알 수 없는 문장"),
         }
     }
@@ -114,6 +115,14 @@ impl Parser {
             ty,
             value,
         }
+    }
+
+    fn parse_return(&mut self) -> Stmt {
+        self.advance(); // return
+
+        let value = self.parse_expression();
+
+        Stmt::Return(value)
     }
 
     fn parse_type(&mut self) -> Type {

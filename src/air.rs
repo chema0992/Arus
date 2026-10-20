@@ -32,6 +32,10 @@ pub enum AirInstruction {
         ty: Option<AirType>,
         value: AirValue,
     },
+
+    Return {
+        value: AirValue,
+    },
 }
 
 #[derive(Debug, Clone)]
@@ -109,27 +113,35 @@ impl AirGenerator {
     }
 
     fn generate_stmt(&mut self, stmt: &Stmt) {
-        match stmt {
-            Stmt::Let {
-                name,
+    match stmt {
+        Stmt::Let {
+            name,
+            ty,
+            value,
+        } => {
+            let value = self.generate_expr(value);
+
+            let ty = ty.as_ref().map(|ty| match ty {
+                Type::I32 => AirType::I32,
+                Type::Named(name) => AirType::Named(name.clone()),
+            });
+
+            self.instructions.push(AirInstruction::Let {
+                name: name.clone(),
                 ty,
                 value,
-            } => {
-                let value = self.generate_expr(value);
+            });
+        }
 
-                let ty = ty.as_ref().map(|ty| match ty {
-                    Type::I32 => AirType::I32,
-                    Type::Named(name) => AirType::Named(name.clone()),
-                });
+        Stmt::Return(value) => {
+            let value = self.generate_expr(value);
 
-                self.instructions.push(AirInstruction::Let {
-                    name: name.clone(),
-                    ty,
-                    value,
-                });
-            }
+            self.instructions.push(AirInstruction::Return {
+                value,
+            });
         }
     }
+}
 
     fn generate_expr(&mut self, expr: &Expr) -> AirValue {
         match expr {
@@ -231,6 +243,12 @@ impl AirAnalyzer {
                 Self::check_value(value);
 
                 println!("AIR CHECK: let OK");
+            }
+
+            AirInstruction::Return { value } => {
+                Self::check_value(value);
+
+                println!("AIR CHECK: return OK");
             }
         }
     }

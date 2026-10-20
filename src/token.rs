@@ -4,6 +4,7 @@ pub enum Token {
     Script,
     Fn,
     Let,
+    Return,
 
     Ident(String),
     Integer(i64),
