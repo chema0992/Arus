@@ -83,8 +83,6 @@ Arus 소스는 두 가지 프로그램 형태 중 하나를 명시하는 방향�
 ```arus
 script
 
-import arus
-
 println("Hello, Arus!")
 let value: i32 = 10
 println(value)
@@ -96,8 +94,6 @@ println(value)
 
 ```arus
 main
-
-import arus
 
 fn main() {
     println("Hello, Arus!")
@@ -237,10 +233,9 @@ println(copy)
 
 ## 표준 입출력
 
-표준 입출력은 `import arus`로 가져오는 방향입니다.
+표준 입출력은 Rust와 Python의 방식처럼, 별도의 선언 없이 내장으로 가져오는 방향입니다.
 
 ```arus
-import arus
 
 print("No newline")
 println("With newline")
@@ -269,4 +264,4 @@ Arus는 아직 실험적인 설계 단계입니다. 현재 문서에 등장하�
 
 ## 라이선스
 
-라이선스는 아직 지정되지 않았습니다.
+LICENSE 문서를 참고하세요.

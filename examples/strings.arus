@@ -1,0 +1,15 @@
+main
+
+fn main() {
+    print("Hello, ")
+    println("Arus!")
+
+    let message: str = "안녕, 아루스!"
+    println(message)
+
+    let inferred = "타입 추론도 됨"
+    println(inferred)
+
+    println(123)
+    return 0
+}

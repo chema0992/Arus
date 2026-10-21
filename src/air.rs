@@ -36,6 +36,11 @@ pub enum AirInstruction {
     Return {
         value: AirValue,
     },
+
+    Call {
+        function: String,
+        args: Vec<AirValue>,
+    },
 }
 
 #[derive(Debug, Clone)]
@@ -49,20 +54,21 @@ pub enum AirBinaryOp {
 #[derive(Debug, Clone)]
 pub enum AirValue {
     Integer(i64),
+    String(String),
     Variable(String),
     Temporary(u32),
 }
 
-#[derive(Debug, Clone)]
+#[derive(Debug, Clone, PartialEq)]
 pub enum AirType {
     I32,
+    Str,
     Named(String),
 }
 
 impl AirProgram {
     pub fn from_ast(program: &Program) -> Self {
         let mut generator = AirGenerator::new();
-
         generator.generate_program(program)
     }
 }
@@ -93,10 +99,7 @@ impl AirGenerator {
             functions.push(self.generate_function(function));
         }
 
-        AirProgram {
-            mode,
-            functions,
-        }
+        AirProgram { mode, functions }
     }
 
     fn generate_function(&mut self, function: &Function) -> AirFunction {
@@ -113,44 +116,49 @@ impl AirGenerator {
     }
 
     fn generate_stmt(&mut self, stmt: &Stmt) {
-    match stmt {
-        Stmt::Let {
-            name,
-            ty,
-            value,
-        } => {
-            let value = self.generate_expr(value);
+        match stmt {
+            Stmt::Let { name, ty, value } => {
+                let value = self.generate_expr(value);
 
-            let ty = ty.as_ref().map(|ty| match ty {
-                Type::I32 => AirType::I32,
-                Type::Named(name) => AirType::Named(name.clone()),
-            });
+                let ty = ty.as_ref().map(|ty| match ty {
+                    Type::I32 => AirType::I32,
+                    Type::Str => AirType::Str,
+                    Type::Named(name) => AirType::Named(name.clone()),
+                });
 
-            self.instructions.push(AirInstruction::Let {
-                name: name.clone(),
-                ty,
-                value,
-            });
-        }
+                self.instructions.push(AirInstruction::Let {
+                    name: name.clone(),
+                    ty,
+                    value,
+                });
+            }
 
-        Stmt::Return(value) => {
-            let value = self.generate_expr(value);
+            Stmt::Return(value) => {
+                let value = self.generate_expr(value);
+                self.instructions.push(AirInstruction::Return { value });
+            }
 
-            self.instructions.push(AirInstruction::Return {
-                value,
-            });
+            Stmt::Call { name, args } => {
+                let args = args
+                    .iter()
+                    .map(|arg| self.generate_expr(arg))
+                    .collect();
+
+                self.instructions.push(AirInstruction::Call {
+                    function: name.clone(),
+                    args,
+                });
+            }
         }
     }
-}
 
     fn generate_expr(&mut self, expr: &Expr) -> AirValue {
         match expr {
-            Expr::Integer(value) => {
-                AirValue::Integer(*value)
-            }
-
-            Expr::Ident(name) => {
-                AirValue::Variable(name.clone())
+            Expr::Integer(value) => AirValue::Integer(*value),
+            Expr::String(value) => AirValue::String(value.clone()),
+            Expr::Ident(name) => AirValue::Variable(name.clone()),
+            Expr::InterpolatedString { .. } => {
+                panic!("AIR ERR: f-string은 아직 구현되지 않았습니다.");
             }
 
             Expr::Binary {
@@ -189,7 +197,6 @@ pub struct AirPrinter;
 impl AirPrinter {
     pub fn print(program: &AirProgram) -> String {
         let mut output = String::new();
-
         output.push_str("module {\n");
 
         for function in &program.functions {
@@ -205,11 +212,10 @@ impl AirPrinter {
         }
 
         output.push_str("}\n");
-
         output
     }
 
-    fn print_instruction(instruction: &AirInstruction) -> String {
+    fn print_instruction(_instruction: &AirInstruction) -> String {
         todo!()
     }
 }
@@ -235,20 +241,33 @@ impl AirAnalyzer {
             } => {
                 Self::check_value(left);
                 Self::check_value(right);
-
                 println!("AIR CHECK: %{destination} OK");
             }
 
             AirInstruction::Let { value, .. } => {
                 Self::check_value(value);
-
                 println!("AIR CHECK: let OK");
             }
 
             AirInstruction::Return { value } => {
                 Self::check_value(value);
-
                 println!("AIR CHECK: return OK");
+            }
+
+            AirInstruction::Call { function, args } => {
+                if function != "print" && function != "println" {
+                    panic!("AIR ERR: 지원하지 않는 함수: {}", function);
+                }
+
+                if args.len() != 1 {
+                    panic!("AIR ERR: 함수 인자는 하나여야 합니다.");
+                }
+
+                for arg in args {
+                    Self::check_value(arg);
+                }
+
+                println!("AIR CHECK: call {} OK", function);
             }
         }
     }
@@ -256,6 +275,7 @@ impl AirAnalyzer {
     fn check_value(value: &AirValue) {
         match value {
             AirValue::Integer(_) => {}
+            AirValue::String(_) => {}
             AirValue::Variable(_) => {}
             AirValue::Temporary(_) => {}
         }

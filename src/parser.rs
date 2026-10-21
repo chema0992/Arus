@@ -27,10 +27,7 @@ impl Parser {
             functions.push(self.parse_function());
         }
 
-        Program {
-            mode,
-            functions,
-        }
+        Program { mode, functions }
     }
 
     fn parse_function(&mut self) -> Function {
@@ -39,7 +36,6 @@ impl Parser {
             _ => panic!("ERR: 함수 선언은 fn으로 시작해야 합니다."),
         }
 
-        // main은 Lexer에서 Token::Main으로 처리됨
         let name = match self.advance() {
             Token::Ident(name) => name,
             Token::Main => "main".to_string(),
@@ -61,7 +57,6 @@ impl Parser {
             _ => panic!("ERR: 함수 본문을 여는 '{{'가 필요합니다."),
         }
 
-        // 함수 본문 파싱
         let mut body = Vec::new();
 
         while *self.peek() != Token::RightBrace {
@@ -72,24 +67,47 @@ impl Parser {
             body.push(self.parse_statement());
         }
 
-        self.advance(); // }
+        self.advance();
 
-        Function {
-            name,
-            body,
-        }
+        Function { name, body }
     }
 
     fn parse_statement(&mut self) -> Stmt {
         match self.peek() {
             Token::Let => self.parse_let(),
             Token::Return => self.parse_return(),
+            Token::Ident(_) => self.parse_call_statement(),
             _ => panic!("ERR: 알 수 없는 문장"),
         }
     }
 
+    fn parse_call_statement(&mut self) -> Stmt {
+        let name = match self.advance() {
+            Token::Ident(name) => name,
+            _ => panic!("ERR: 함수 이름이 필요합니다."),
+        };
+
+        match self.advance() {
+            Token::LeftParen => {}
+            _ => panic!("ERR: '('가 필요합니다."),
+        }
+
+        let mut args = Vec::new();
+
+        if *self.peek() != Token::RightParen {
+            args.push(self.parse_expression());
+        }
+
+        match self.advance() {
+            Token::RightParen => {}
+            _ => panic!("ERR: ')'가 필요합니다."),
+        }
+
+        Stmt::Call { name, args }
+    }
+
     fn parse_let(&mut self) -> Stmt {
-        self.advance(); // let
+        self.advance();
 
         let name = match self.advance() {
             Token::Ident(name) => name,
@@ -97,7 +115,7 @@ impl Parser {
         };
 
         let ty = if *self.peek() == Token::Colon {
-            self.advance(); // :
+            self.advance();
             Some(self.parse_type())
         } else {
             None
@@ -110,24 +128,19 @@ impl Parser {
 
         let value = self.parse_expression();
 
-        Stmt::Let {
-            name,
-            ty,
-            value,
-        }
+        Stmt::Let { name, ty, value }
     }
 
     fn parse_return(&mut self) -> Stmt {
-        self.advance(); // return
-
+        self.advance();
         let value = self.parse_expression();
-
         Stmt::Return(value)
     }
 
     fn parse_type(&mut self) -> Type {
         match self.advance() {
             Token::Ident(name) if name == "i32" => Type::I32,
+            Token::Ident(name) if name == "str" => Type::Str,
             Token::Ident(name) => Type::Named(name),
             _ => panic!("ERR: 타입이 필요합니다."),
         }
@@ -144,7 +157,6 @@ impl Parser {
             };
 
             self.advance();
-
             let right = self.parse_term();
 
             expr = Expr::Binary {
@@ -168,7 +180,6 @@ impl Parser {
             };
 
             self.advance();
-
             let right = self.parse_factor();
 
             expr = Expr::Binary {
@@ -184,7 +195,7 @@ impl Parser {
     fn parse_factor(&mut self) -> Expr {
         match self.advance() {
             Token::Integer(value) => Expr::Integer(value),
-
+            Token::StringLiteral(value) => Expr::String(value),
             Token::Ident(name) => Expr::Ident(name),
 
             Token::LeftParen => {
@@ -207,7 +218,6 @@ impl Parser {
     fn advance(&mut self) -> Token {
         let token = self.tokens[self.position].clone();
 
-        // EOF 다음으로 이동하지 않음
         if token != Token::EOF {
             self.position += 1;
         }

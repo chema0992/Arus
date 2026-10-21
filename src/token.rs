@@ -8,15 +8,14 @@ pub enum Token {
 
     Ident(String),
     Integer(i64),
+    StringLiteral(String),
 
     Plus,
     Minus,
     Star,
     Slash,
-
-    Colon,
-
     Equal,
+    Colon,
 
     LeftParen,
     RightParen,
