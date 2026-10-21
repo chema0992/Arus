@@ -3,3 +3,7 @@
 Cargo.toml
 
 Cargo.lock
+
+*.ll
+
+arus_program
