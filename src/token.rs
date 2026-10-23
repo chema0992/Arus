@@ -6,6 +6,11 @@ pub enum Token {
     Let,
     Return,
 
+    If,
+    Else,
+    True,
+    False,
+
     Ident(String),
     Integer(i64),
     StringLiteral(String),
@@ -14,7 +19,16 @@ pub enum Token {
     Minus,
     Star,
     Slash,
+
     Equal,
+    EqualEqual,
+    BangEqual,
+
+    Less,
+    Greater,
+    LessEqual,
+    GreaterEqual,
+
     Colon,
 
     LeftParen,

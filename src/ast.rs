@@ -30,12 +30,18 @@ pub enum Stmt {
         name: String,
         args: Vec<Expr>,
     },
-}
 
+    If {
+        condition: Expr,
+        then_body: Vec<Stmt>,
+        else_body: Option<ElseBody>,
+    },
+}
 #[derive(Debug)]
 pub enum Expr {
     Integer(i64),
     String(String),
+    Bool(bool),
     Ident(String),
 
     // Reserved AST shape for future f"...{expression}..." support.
@@ -66,11 +72,32 @@ pub enum BinaryOp {
     Sub,
     Mul,
     Div,
+
+    Equal,
+    NotEqual,
+    Less,
+    Greater,
+    LessEqual,
+    GreaterEqual,
 }
 
 #[derive(Debug)]
 pub enum Type {
     I32,
     Str,
+    Bool,
     Named(String),
+}
+
+#[derive(Debug)]
+pub enum ElseBody {
+    ElseIf {
+        condition: Expr,
+        body: Vec<Stmt>,
+        next: Option<Box<ElseBody>>,
+    },
+
+    Else {
+        body: Vec<Stmt>,
+    },
 }
