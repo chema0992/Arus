@@ -1,0 +1,10 @@
+main
+
+fn main() {
+    while true {
+        println("while works")
+        return 0
+    }
+
+    return 0
+}

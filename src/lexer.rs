@@ -159,6 +159,7 @@ impl Lexer {
             "return" => Token::Return,
             "if" => Token::If,
             "else" => Token::Else,
+            "while" => Token::While,
             "true" => Token::True,
             "false" => Token::False,
             _ => Token::Ident(name),

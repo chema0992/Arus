@@ -49,6 +49,12 @@ pub enum AirInstruction {
         then_body: Vec<AirInstruction>,
         else_body: Option<Vec<AirInstruction>>,
     },
+
+    While {
+        condition_instructions: Vec<AirInstruction>,
+        condition: AirValue,
+        body: Vec<AirInstruction>,
+    },
 }
 
 #[derive(Debug, Clone)]
@@ -176,6 +182,29 @@ impl AirGenerator {
         }
     }
 
+        fn generate_while_block(&mut self, condition: &Expr, body: &[Stmt]) -> Vec<AirInstruction> {
+            let outer_instructions = std::mem::take(&mut self.instructions);
+
+            // 조건식을 계산하며 생성된 AIR 명령을 별도로 저장한다.
+            let condition = self.generate_expr(condition);
+            let condition_instructions =
+                std::mem::take(&mut self.instructions);
+
+            // 반복문 본문을 별도의 AIR 명령 목록으로 생성한다.
+            let body = self.generate_block(body);
+
+            self.instructions.push(AirInstruction::While {
+                condition_instructions,
+                condition,
+                body,
+            });
+
+            std::mem::replace(
+                &mut self.instructions,
+                outer_instructions,
+            )
+        }
+
     fn generate_stmt(&mut self, stmt: &Stmt) {
         match stmt {
             Stmt::Let { name, ty, value } => {
@@ -222,6 +251,15 @@ impl AirGenerator {
                     then_body,
                     else_body.as_ref(),
                 );
+
+                self.instructions.extend(instructions);
+            }
+
+            Stmt::While {
+                condition,
+                body,
+            } => {
+                let instructions = self.generate_while_block(condition, body);
 
                 self.instructions.extend(instructions);
             }
@@ -381,6 +419,55 @@ impl AirPrinter {
 
                     output.push_str(&format!("{prefix}}}"));
                 }
+
+                output
+            }
+
+            AirInstruction::While {
+                condition_instructions,
+                condition,
+                body,
+            } => {
+                let mut output =
+                    format!("{prefix}while {{\n");
+
+                output.push_str(
+                    &format!("{prefix}    condition {{\n")
+                );
+
+                output.push_str(
+                    &Self::print_instructions(
+                        condition_instructions,
+                        indent + 8,
+                    )
+                );
+
+                output.push_str(
+                    &format!(
+                        "{prefix}        branch_if {}\n",
+                        Self::print_value(condition),
+                    )
+                );
+
+                output.push_str(
+                    &format!("{prefix}    }}\n")
+                );
+
+                output.push_str(
+                    &format!("{prefix}    body {{\n")
+                );
+
+                output.push_str(
+                    &Self::print_instructions(body, indent + 8)
+                );
+
+                output.push_str(
+                    &format!("{prefix}    }}\n")
+                );
+
+                output.push_str(
+                    &format!("{prefix}}}")
+                );
 
                 output
             }
@@ -583,6 +670,47 @@ impl AirAnalyzer {
                     }
 
                     println!("AIR CHECK: if OK");
+                }
+
+                AirInstruction::While {
+                    condition_instructions,
+                    condition,
+                    body,
+                } => {
+                    // 반복 조건식에서 생성된 임시값을 검사한다.
+                    let mut condition_temporaries =
+                        temporaries.clone();
+
+                    Self::check_instructions(
+                        condition_instructions,
+                        variables,
+                        &mut condition_temporaries,
+                    );
+
+                    // while 조건은 bool이어야 한다.
+                    let condition_type = Self::value_type(
+                        condition,
+                        variables,
+                        &condition_temporaries,
+                    );
+
+                    if condition_type != AirType::Bool {
+                        panic!(
+                            "AIR ERR: while 조건식에는 bool 타입이 필요합니다."
+                        );
+                    }
+
+                    // 반복문 안의 변수 환경은 별도로 검사한다.
+                    let mut body_variables = variables.clone();
+                    let mut body_temporaries = temporaries.clone();
+
+                    Self::check_instructions(
+                        body,
+                        &mut body_variables,
+                        &mut body_temporaries,
+                    );
+
+                    println!("AIR CHECK: while OK");
                 }
             }
         }

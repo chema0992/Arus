@@ -36,6 +36,11 @@ pub enum Stmt {
         then_body: Vec<Stmt>,
         else_body: Option<ElseBody>,
     },
+
+    While {
+        condition: Expr,
+        body: Vec<Stmt>,
+    },
 }
 #[derive(Debug)]
 pub enum Expr {

@@ -17,6 +17,7 @@ pub struct LlvmGenerator {
     next_string: u32,
     next_call: u32,
     next_if: u32,
+    next_while: u32,
     next_bool_string: u32,
     current_terminated: bool,
 }
@@ -44,6 +45,7 @@ impl LlvmGenerator {
             next_string: 0,
             next_call: 1,
             next_if: 1,
+            next_while: 1,
             next_bool_string: 1,
             current_terminated: false,
         }
@@ -64,6 +66,7 @@ impl LlvmGenerator {
         self.temporary_types.clear();
         self.next_call = 1;
         self.next_if = 1;
+        self.next_while = 1;
         self.next_bool_string = 1;
         self.current_terminated = false;
 
@@ -305,6 +308,14 @@ impl LlvmGenerator {
             } => {
                 self.generate_if(condition, then_body, else_body.as_deref());
             }
+
+            AirInstruction::While {
+                condition_instructions,
+                condition,
+                body,
+            } => {
+                self.generate_while(condition_instructions, condition, body);
+            }
         }
     }
 
@@ -366,6 +377,78 @@ impl LlvmGenerator {
             self.current_terminated = true;
         }
 
+        self.output.push_str(&format!("{end_label}:\n"));
+
+        self.variables = outer_variables;
+        self.current_terminated = false;
+    }
+
+    fn generate_while(
+        &mut self,
+        condition_instructions: &[AirInstruction],
+        condition: &AirValue,
+        body: &[AirInstruction],
+    ) {
+        let while_id = self.next_while;
+        self.next_while += 1;
+
+        let condition_label =
+            format!("while.condition.{while_id}");
+        let body_label =
+            format!("while.body.{while_id}");
+        let end_label =
+            format!("while.end.{while_id}");
+
+        // 현재 블록에서 반복 조건 블록으로 이동한다.
+        self.output.push_str(&format!(
+            "    br label %{condition_label}\n"
+        ));
+        self.current_terminated = true;
+
+        let outer_variables = self.variables.clone();
+
+        // 조건 블록: 반복할 때마다 다시 실행된다.
+        self.output.push_str(
+            &format!("{condition_label}:\n")
+        );
+        self.current_terminated = false;
+        self.variables = outer_variables.clone();
+
+        self.generate_instructions(condition_instructions);
+
+        let condition = self.value(condition);
+
+        if condition.ty != AirType::Bool {
+            panic!(
+                "LLVM ERR: while 조건식에는 bool 타입이 필요합니다."
+            );
+        }
+
+        // 참이면 본문으로, 거짓이면 반복문 종료 지점으로 이동한다.
+        self.output.push_str(&format!(
+            "    br i1 {}, label %{}, label %{}\n",
+            condition.operand,
+            body_label,
+            end_label,
+        ));
+        self.current_terminated = true;
+
+        // 반복문 본문
+        self.output.push_str(&format!("{body_label}:\n"));
+        self.current_terminated = false;
+        self.variables = outer_variables.clone();
+
+        self.generate_instructions(body);
+
+        // 본문이 return 등으로 끝나지 않았다면 조건으로 돌아간다.
+        if !self.current_terminated {
+            self.output.push_str(&format!(
+                "    br label %{condition_label}\n"
+            ));
+            self.current_terminated = true;
+        }
+
+        // 반복문 종료 지점
         self.output.push_str(&format!("{end_label}:\n"));
 
         self.variables = outer_variables;

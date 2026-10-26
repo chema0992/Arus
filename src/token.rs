@@ -8,6 +8,7 @@ pub enum Token {
 
     If,
     Else,
+    While,
     True,
     False,
 

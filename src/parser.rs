@@ -90,6 +90,7 @@ impl Parser {
             Token::Let => self.parse_let(),
             Token::Return => self.parse_return(),
             Token::If => self.parse_if(),
+            Token::While => self.parse_while(),
             Token::Ident(_) => self.parse_call_statement(),
 
             _ => panic!(
@@ -152,6 +153,21 @@ impl Parser {
                 "Parser ERR: else 뒤에는 if 또는 '{{'가 필요합니다. 현재 토큰: {:?}",
                 self.peek()
             );
+        }
+    }
+
+    fn parse_while(&mut self) -> Stmt {
+        match self.advance() {
+            Token::While => {}
+            _ => unreachable!(),
+        }
+
+        let condition = self.parse_expression();
+        let body = self.parse_block();
+
+        Stmt::While {
+            condition,
+            body,
         }
     }
 
