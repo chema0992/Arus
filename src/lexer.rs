@@ -1,4 +1,3 @@
-
 use crate::token::Token;
 
 pub struct Lexer {
@@ -60,7 +59,26 @@ impl Lexer {
                         self.position += 2;
                         Token::BangEqual
                     } else {
-                        panic!("Lexer ERR: 예상하지 못한 문자 '!'");
+                        self.position += 1;
+                        Token::Bang
+                    }
+                }
+
+                '&' => {
+                    if self.input.get(self.position + 1) == Some(&'&') {
+                        self.position += 2;
+                        Token::AndAnd
+                    } else {
+                        panic!("Lexer ERR: 단독 '&'는 지원하지 않습니다.");
+                    }
+                }
+
+                '|' => {
+                    if self.input.get(self.position + 1) == Some(&'|') {
+                        self.position += 2;
+                        Token::OrOr
+                    } else {
+                        panic!("Lexer ERR: 단독 '|'는 지원하지 않습니다.");
                     }
                 }
 

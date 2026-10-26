@@ -1,0 +1,14 @@
+
+main
+
+fn main() {
+    let a: i32 = 10
+    let b: bool = true
+
+    if a && b {
+        println("잘못된 논리 연산")
+    }
+
+    return 0
+}
+

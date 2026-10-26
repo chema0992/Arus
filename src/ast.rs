@@ -61,6 +61,11 @@ pub enum Expr {
         operator: BinaryOp,
         right: Box<Expr>,
     },
+
+    Unary {
+        operator: UnaryOp,
+        operand: Box<Expr>,
+    },
 }
 
 // A future f-string is represented as alternating text and parsed expressions.
@@ -84,6 +89,14 @@ pub enum BinaryOp {
     Greater,
     LessEqual,
     GreaterEqual,
+
+    And,
+    Or,
+}
+
+#[derive(Debug)]
+pub enum UnaryOp {
+    Not,
 }
 
 #[derive(Debug)]

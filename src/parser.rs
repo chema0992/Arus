@@ -241,12 +241,79 @@ impl Parser {
 
     // 비교 연산자: == != < > <= >=
     fn parse_expression(&mut self) -> Expr {
-        let mut expr = self.parse_additive();
+        self.parse_logical_or()
+    }
+
+    fn parse_logical_or(&mut self) -> Expr {
+        let mut expr = self.parse_logical_and();
+
+        loop {
+            if *self.peek() != Token::OrOr {
+                break;
+            }
+
+            self.advance();
+            let right = self.parse_logical_and();
+
+            expr = Expr::Binary {
+                left: Box::new(expr),
+                operator: BinaryOp::Or,
+                right: Box::new(right),
+            };
+        }
+
+        expr
+    }
+
+    fn parse_logical_and(&mut self) -> Expr {
+        let mut expr = self.parse_equality();
+
+        loop {
+            if *self.peek() != Token::AndAnd {
+                break;
+            }
+
+            self.advance();
+            let right = self.parse_equality();
+
+            expr = Expr::Binary {
+                left: Box::new(expr),
+                operator: BinaryOp::And,
+                right: Box::new(right),
+            };
+        }
+
+        expr
+    }
+
+    fn parse_equality(&mut self) -> Expr {
+        let mut expr = self.parse_comparison();
 
         loop {
             let operator = match self.peek() {
                 Token::EqualEqual => BinaryOp::Equal,
                 Token::BangEqual => BinaryOp::NotEqual,
+                _ => break,
+            };
+
+            self.advance();
+            let right = self.parse_comparison();
+
+            expr = Expr::Binary {
+                left: Box::new(expr),
+                operator,
+                right: Box::new(right),
+            };
+        }
+
+        expr
+    }
+
+    fn parse_comparison(&mut self) -> Expr {
+        let mut expr = self.parse_additive();
+
+        loop {
+            let operator = match self.peek() {
                 Token::Less => BinaryOp::Less,
                 Token::Greater => BinaryOp::Greater,
                 Token::LessEqual => BinaryOp::LessEqual,
@@ -255,7 +322,6 @@ impl Parser {
             };
 
             self.advance();
-
             let right = self.parse_additive();
 
             expr = Expr::Binary {
@@ -295,7 +361,7 @@ impl Parser {
 
     // 곱셈과 나눗셈
     fn parse_term(&mut self) -> Expr {
-        let mut expr = self.parse_factor();
+        let mut expr = self.parse_unary();
 
         loop {
             let operator = match self.peek() {
@@ -306,7 +372,7 @@ impl Parser {
 
             self.advance();
 
-            let right = self.parse_factor();
+            let right = self.parse_unary();
 
             expr = Expr::Binary {
                 left: Box::new(expr),
@@ -316,6 +382,21 @@ impl Parser {
         }
 
         expr
+    }
+
+    fn parse_unary(&mut self) -> Expr {
+        if *self.peek() == Token::Bang {
+            self.advance();
+
+            let operand = self.parse_unary();
+
+            return Expr::Unary {
+                operator: UnaryOp::Not,
+                operand: Box::new(operand),
+            };
+        }
+
+        self.parse_factor()
     }
 
     fn parse_factor(&mut self) -> Expr {

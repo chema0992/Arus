@@ -9,7 +9,7 @@ mod llvm;
 mod parser;
 mod token;
 
-use air::{AirAnalyzer, AirProgram};
+use air::{AirAnalyzer, AirProgram, AirTypeChecker};
 use lexer::Lexer;
 use llvm::LlvmGenerator;
 use parser::Parser;
@@ -48,6 +48,11 @@ fn main() {
 
     println!("=== AIR ===");
     println!("{:#?}", air);
+
+    if let Err(error) = AirTypeChecker::check(&air) {
+        eprintln!("{error}");
+        std::process::exit(1);
+    }
 
     AirAnalyzer::analyze(&air);
 

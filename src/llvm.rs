@@ -18,6 +18,8 @@ pub struct LlvmGenerator {
     next_call: u32,
     next_if: u32,
     next_while: u32,
+    next_logical: u32,
+    current_block: String,
     next_bool_string: u32,
     current_terminated: bool,
 }
@@ -46,6 +48,8 @@ impl LlvmGenerator {
             next_call: 1,
             next_if: 1,
             next_while: 1,
+            next_logical: 1,
+            current_block: String::new(),
             next_bool_string: 1,
             current_terminated: false,
         }
@@ -67,6 +71,7 @@ impl LlvmGenerator {
         self.next_call = 1;
         self.next_if = 1;
         self.next_while = 1;
+        self.next_logical = 1;
         self.next_bool_string = 1;
         self.current_terminated = false;
 
@@ -74,6 +79,8 @@ impl LlvmGenerator {
             .push_str(&format!("define i32 @{}() {{\n", function.name));
 
         self.output.push_str("entry:\n");
+
+        self.current_block = "entry".to_string();
 
         self.generate_instructions(&function.instructions);
 
@@ -223,6 +230,53 @@ impl LlvmGenerator {
                 self.temporary_types.insert(*destination, result_type);
             }
 
+            AirInstruction::Unary {
+                destination,
+                operator,
+                operand,
+            } => {
+                let operand = self.value(operand);
+
+                match operator {
+                    AirUnaryOp::Not => {
+                        if operand.ty != AirType::Bool {
+                            panic!(
+                                "LLVM ERR: '!' 연산에는 bool 값이 필요합니다."
+                            );
+                        }
+
+                        self.output.push_str(&format!(
+                            "    %t{} = xor i1 {}, true\n",
+                            destination,
+                            operand.operand,
+                        ));
+
+                        self.temporary_types.insert(
+                            *destination,
+                            AirType::Bool,
+                        );
+                    }
+                }
+            }
+
+            AirInstruction::Logical {
+                destination,
+                operator,
+                left_instructions,
+                left,
+                right_instructions,
+                right,
+            } => {
+                self.generate_logical(
+                    *destination,
+                    operator,
+                    left_instructions,
+                    left,
+                    right_instructions,
+                    right,
+                );
+            }
+
             AirInstruction::Let { name, ty, value } => {
                 let value = self.value(value);
                 let declared_type = ty.clone().unwrap_or_else(|| value.ty.clone());
@@ -319,12 +373,7 @@ impl LlvmGenerator {
         }
     }
 
-    fn generate_if(
-        &mut self,
-        condition: &AirValue,
-        then_body: &[AirInstruction],
-        else_body: Option<&[AirInstruction]>,
-    ) {
+    fn generate_if(&mut self, condition: &AirValue, then_body: &[AirInstruction], else_body: Option<&[AirInstruction]>) {
         let condition = self.value(condition);
 
         if condition.ty != AirType::Bool {
@@ -352,6 +401,7 @@ impl LlvmGenerator {
         let outer_variables = self.variables.clone();
 
         self.output.push_str(&format!("{then_label}:\n"));
+        self.current_block = then_label.clone();
         self.current_terminated = false;
         self.variables = outer_variables.clone();
 
@@ -364,6 +414,7 @@ impl LlvmGenerator {
         }
 
         self.output.push_str(&format!("{else_label}:\n"));
+        self.current_block = else_label.clone();
         self.current_terminated = false;
         self.variables = outer_variables.clone();
 
@@ -378,9 +429,125 @@ impl LlvmGenerator {
         }
 
         self.output.push_str(&format!("{end_label}:\n"));
+        self.current_block = end_label.clone();
 
         self.variables = outer_variables;
         self.current_terminated = false;
+    }
+
+    fn generate_logical(
+        &mut self,
+        destination: u32,
+        operator: &AirLogicalOp,
+        left_instructions: &[AirInstruction],
+        left: &AirValue,
+        right_instructions: &[AirInstruction],
+        right: &AirValue,
+    ) {
+        // 왼쪽 식은 먼저 평가한다.
+        self.generate_instructions(left_instructions);
+
+        if self.current_terminated {
+            panic!(
+                "LLVM ERR: 논리 연산의 왼쪽 식이 비정상적으로 종료되었습니다."
+            );
+        }
+
+        let left_value = self.value(left);
+
+        if left_value.ty != AirType::Bool {
+            panic!(
+                "LLVM ERR: 논리 연산의 왼쪽 값에는 bool 타입이 필요합니다."
+            );
+        }
+
+        let left_block = self.current_block.clone();
+
+        let logical_id = self.next_logical;
+        self.next_logical += 1;
+
+        let right_label =
+            format!("logical.right.{logical_id}");
+
+        let end_label =
+            format!("logical.end.{logical_id}");
+
+        let (true_target, false_target, short_value) =
+            match operator {
+                AirLogicalOp::And => {
+                    (&right_label, &end_label, "false")
+                }
+
+                AirLogicalOp::Or => {
+                    (&end_label, &right_label, "true")
+                }
+            };
+
+        // AND: false이면 오른쪽 식을 건너뛴다.
+        // OR: true이면 오른쪽 식을 건너뛴다.
+        self.output.push_str(&format!(
+            "    br i1 {}, label %{}, label %{}\n",
+            left_value.operand,
+            true_target,
+            false_target,
+        ));
+
+        self.current_terminated = true;
+
+        // 오른쪽 식을 평가하는 블록
+        self.output.push_str(
+            &format!("{right_label}:\n")
+        );
+
+        self.current_block = right_label.clone();
+        self.current_terminated = false;
+
+        self.generate_instructions(right_instructions);
+
+        if self.current_terminated {
+            panic!(
+                "LLVM ERR: 논리 연산의 오른쪽 식이 비정상적으로 종료되었습니다."
+            );
+        }
+
+        let right_value = self.value(right);
+
+        if right_value.ty != AirType::Bool {
+            panic!(
+                "LLVM ERR: 논리 연산의 오른쪽 값에는 bool 타입이 필요합니다."
+            );
+        }
+
+        let right_block = self.current_block.clone();
+
+        self.output.push_str(&format!(
+            "    br label %{end_label}\n"
+        ));
+
+        self.current_terminated = true;
+
+        // 두 경로가 합쳐지는 블록
+        self.output.push_str(
+            &format!("{end_label}:\n")
+        );
+
+        self.current_block = end_label;
+        self.current_terminated = false;
+
+        // 단락 평가 경로의 값과 오른쪽 식의 값을 합친다.
+        self.output.push_str(&format!(
+            "    %t{} = phi i1 [ {}, %{} ], [ {}, %{} ]\n",
+            destination,
+            short_value,
+            left_block,
+            right_value.operand,
+            right_block,
+        ));
+
+        self.temporary_types.insert(
+            destination,
+            AirType::Bool,
+        );
     }
 
     fn generate_while(
@@ -411,6 +578,8 @@ impl LlvmGenerator {
         self.output.push_str(
             &format!("{condition_label}:\n")
         );
+
+        self.current_block = condition_label.clone();
         self.current_terminated = false;
         self.variables = outer_variables.clone();
 
@@ -435,6 +604,7 @@ impl LlvmGenerator {
 
         // 반복문 본문
         self.output.push_str(&format!("{body_label}:\n"));
+        self.current_block = body_label.clone();
         self.current_terminated = false;
         self.variables = outer_variables.clone();
 
@@ -450,6 +620,7 @@ impl LlvmGenerator {
 
         // 반복문 종료 지점
         self.output.push_str(&format!("{end_label}:\n"));
+        self.current_block = end_label.clone();
 
         self.variables = outer_variables;
         self.current_terminated = false;

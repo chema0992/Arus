@@ -24,6 +24,9 @@ pub enum Token {
     Equal,
     EqualEqual,
     BangEqual,
+    AndAnd,
+    OrOr,
+    Bang,
 
     Less,
     Greater,
