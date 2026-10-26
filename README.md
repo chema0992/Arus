@@ -1,5 +1,7 @@
 # Arus
 
+<img width="1280" height="640" alt="logo2" src="https://github.com/user-attachments/assets/6cfaa956-3daf-484c-80a3-35a3a3223af1" />
+
 > **작성은 쉽게, 성능은 강력하게.**
 
 Arus는 읽고 쓰기 쉬운 문법과 네이티브 코드 성능을 목표로 설계 중인 시스템 프로그래밍 언어입니다. 독자적인 중간 표현인 **AIR(Arus Intermediate Representation)** 과 권한(permission) 기반 포인터 모델을 핵심 설계 요소로 삼습니다.
