@@ -1,0 +1,29 @@
+main
+
+fn add(a: i32, b: i32, c: bool) -> i32 {
+    print("그리고 ")
+    print(c)
+    println("이렇게 이어서도 출력이 됨")
+    return a + b
+}
+
+fn main() {
+    println(add(1, 2, true))
+    let x: i32 = 50
+    let y: i32 = 20
+    let mystr: str = "문자열"
+    println(mystr)
+
+    if x > y {
+        println("x가 y보다 더 큼")
+    }
+
+    let a: i32 = 1 + 2 << 3
+    let b: i32 = 12 & 10 ^ 3 | 1
+
+    if a != 0 {
+        println("a는 0이 아님")
+    }
+
+    return 0
+}
