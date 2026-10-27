@@ -13,7 +13,15 @@ pub enum ProgramMode {
 #[derive(Debug)]
 pub struct Function {
     pub name: String,
+    pub params: Vec<Parameter>,
+    pub return_type: Option<Type>,
     pub body: Vec<Stmt>,
+}
+
+#[derive(Debug)]
+pub struct Parameter {
+    pub name: String,
+    pub ty: Type,
 }
 
 #[derive(Debug)]
@@ -23,52 +31,48 @@ pub enum Stmt {
         ty: Option<Type>,
         value: Expr,
     },
-
     Return(Expr),
-
     Call {
         name: String,
         args: Vec<Expr>,
     },
-
     If {
         condition: Expr,
         then_body: Vec<Stmt>,
         else_body: Option<ElseBody>,
     },
-
     While {
         condition: Expr,
         body: Vec<Stmt>,
     },
 }
+
 #[derive(Debug)]
 pub enum Expr {
     Integer(i64),
     String(String),
     Bool(bool),
     Ident(String),
-
+    Call {
+        name: String,
+        args: Vec<Expr>,
+    },
     // Reserved AST shape for future f"...{expression}..." support.
-    // The lexer/parser do not construct this variant yet.
     #[allow(dead_code)]
     InterpolatedString {
         parts: Vec<StringPart>,
     },
-
     Binary {
         left: Box<Expr>,
         operator: BinaryOp,
         right: Box<Expr>,
     },
-
     Unary {
         operator: UnaryOp,
         operand: Box<Expr>,
     },
 }
 
-// A future f-string is represented as alternating text and parsed expressions.
 #[allow(dead_code)]
 #[derive(Debug)]
 pub enum StringPart {
@@ -82,14 +86,12 @@ pub enum BinaryOp {
     Sub,
     Mul,
     Div,
-
     Equal,
     NotEqual,
     Less,
     Greater,
     LessEqual,
     GreaterEqual,
-
     And,
     Or,
 }
@@ -99,7 +101,7 @@ pub enum UnaryOp {
     Not,
 }
 
-#[derive(Debug)]
+#[derive(Debug, Clone, PartialEq)]
 pub enum Type {
     I32,
     Str,
@@ -114,7 +116,6 @@ pub enum ElseBody {
         body: Vec<Stmt>,
         next: Option<Box<ElseBody>>,
     },
-
     Else {
         body: Vec<Stmt>,
     },

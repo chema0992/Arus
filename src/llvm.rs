@@ -21,6 +21,7 @@ pub struct LlvmGenerator {
     next_logical: u32,
     current_block: String,
     next_bool_string: u32,
+    function_signatures: HashMap<String, (Vec<AirType>, AirType)>,
     current_terminated: bool,
 }
 
@@ -51,12 +52,22 @@ impl LlvmGenerator {
             next_logical: 1,
             current_block: String::new(),
             next_bool_string: 1,
+            function_signatures: HashMap::new(),
             current_terminated: false,
         }
     }
 
     pub fn generate(program: &AirProgram) -> String {
         let mut generator = Self::new();
+        generator.function_signatures = program.functions.iter().map(|function| {
+            (
+                function.name.clone(),
+                (
+                    function.params.iter().map(|param| param.ty.clone()).collect(),
+                    function.return_type.clone(),
+                ),
+            )
+        }).collect();
 
         for function in &program.functions {
             generator.generate_function(function);
@@ -75,17 +86,43 @@ impl LlvmGenerator {
         self.next_bool_string = 1;
         self.current_terminated = false;
 
-        self.output
-            .push_str(&format!("define i32 @{}() {{\n", function.name));
+        let params = function.params.iter()
+            .enumerate()
+            .map(|(index, param)| format!("{} %arg{}", Self::llvm_type(&param.ty), index))
+            .collect::<Vec<_>>()
+            .join(", ");
+        self.output.push_str(&format!(
+            "define {} @{}({}) {{\n",
+            Self::llvm_type(&function.return_type),
+            function.name,
+            params,
+        ));
 
         self.output.push_str("entry:\n");
-
         self.current_block = "entry".to_string();
+
+        for (index, param) in function.params.iter().enumerate() {
+            self.variables.insert(param.name.clone(), GeneratedValue {
+                operand: format!("%arg{}", index),
+                ty: param.ty.clone(),
+            });
+        }
 
         self.generate_instructions(&function.instructions);
 
         if !self.current_terminated {
-            self.output.push_str("    ret i32 0\n");
+            let (llvm_type, default_value) = match &function.return_type {
+                AirType::I32 => ("i32", "0"),
+                AirType::Bool => ("i1", "false"),
+                AirType::Str => ("ptr", "null"),
+                AirType::Void => ("void", ""),
+                AirType::Named(name) => panic!("LLVM ERR: 지원하지 않는 반환 타입: {name}"),
+            };
+            if function.return_type == AirType::Void {
+                self.output.push_str("    ret void\n");
+            } else {
+                self.output.push_str(&format!("    ret {llvm_type} {default_value}\n"));
+            }
             self.current_terminated = true;
         }
 
@@ -293,66 +330,103 @@ impl LlvmGenerator {
 
             AirInstruction::Return { value } => {
                 let value = self.value(value);
-
-                if value.ty != AirType::I32 {
-                    panic!("LLVM ERR: 현재 return은 i32 값만 지원합니다.");
-                }
-
-                self.output
-                    .push_str(&format!("    ret i32 {}\n", value.operand));
-
+                self.output.push_str(&format!(
+                    "    ret {} {}\n",
+                    Self::llvm_type(&value.ty),
+                    value.operand
+                ));
                 self.current_terminated = true;
             }
 
-            AirInstruction::Call { function, args } => {
-                if function != "print" && function != "println" {
-                    panic!("LLVM ERR: 지원하지 않는 출력 함수: {function}");
+            AirInstruction::Call { destination, function, args } => {
+                if function == "print" || function == "println" {
+                    if destination.is_some() {
+                        panic!("LLVM ERR: print/println은 반환값이 있는 식으로 사용할 수 없습니다.");
+                    }
+                    if args.len() != 1 {
+                        panic!("LLVM ERR: 함수 인자는 하나여야 합니다.");
+                    }
+
+                    let value = self.value(&args[0]);
+                    let format_string = match (function.as_str(), &value.ty) {
+                        ("print", AirType::I32) => "@.fmt.print.i32",
+                        ("println", AirType::I32) => "@.fmt.println.i32",
+
+                        ("print", AirType::Str) => "@.fmt.print.str",
+                        ("println", AirType::Str) => "@.fmt.println.str",
+
+                        ("print", AirType::Bool) => "@.fmt.print.bool",
+                        ("println", AirType::Bool) => "@.fmt.println.bool",
+
+                        (_, AirType::Named(name)) => {
+                            panic!(
+                                "LLVM ERR: 출력할 수 없는 타입입니다: {name}"
+                            );
+                        }
+
+                        (_, AirType::Void) => {
+                            panic!("LLVM ERR: void 값은 출력할 수 없습니다.");
+                        }
+
+                        _ => {
+                            panic!(
+                                "LLVM ERR: 지원하지 않는 출력 함수 또는 타입입니다: {}",
+                                function
+                            );
+                        }
+                    };
+
+                    let (llvm_type, operand) = match &value.ty {
+                        AirType::I32 => ("i32", value.operand.clone()),
+                        AirType::Str => ("ptr", value.operand.clone()),
+                        AirType::Bool => ("ptr", self.bool_string_pointer(&value.operand)),
+                        AirType::Void => panic!("LLVM ERR: void 값은 출력할 수 없습니다."),
+                        AirType::Named(name) => panic!("LLVM ERR: 출력할 수 없는 타입입니다: {name}"),
+                    };
+
+                    let call_id = self.next_call;
+                    self.next_call += 1;
+                    self.output.push_str(&format!(
+                        "    %call{} = call i32 (ptr, ...) @printf(ptr {}, {} {})\n",
+                        call_id, format_string, llvm_type, operand
+                    ));
+                } else {
+                    let (param_types, return_type) = self.function_signatures
+                        .get(function)
+                        .cloned()
+                        .unwrap_or_else(|| panic!("LLVM ERR: 선언되지 않은 함수: {function}"));
+
+                    if args.len() != param_types.len() {
+                        panic!("LLVM ERR: 함수 '{function}'의 인자 개수가 맞지 않습니다.");
+                    }
+
+                    let mut generated_args = Vec::with_capacity(args.len());
+                    for (arg, expected_type) in args.iter().zip(param_types.iter()) {
+                        let value = self.value(arg);
+                        if &value.ty != expected_type {
+                            panic!("LLVM ERR: 함수 '{function}'의 인자 타입이 맞지 않습니다.");
+                        }
+                        generated_args.push(format!("{} {}", Self::llvm_type(&value.ty), value.operand));
+                    }
+                    let args_text = generated_args.join(", ");
+                    let llvm_return_type = Self::llvm_type(&return_type);
+
+                    if let Some(destination) = destination {
+                        if return_type == AirType::Void {
+                            panic!("LLVM ERR: 반환값이 없는 함수 '{function}'를 식 안에서 사용할 수 없습니다.");
+                        }
+                        self.output.push_str(&format!(
+                            "    %t{} = call {} @{}({})\n",
+                            destination, llvm_return_type, function, args_text
+                        ));
+                        self.temporary_types.insert(*destination, return_type);
+                    } else {
+                        self.output.push_str(&format!(
+                            "    call {} @{}({})\n",
+                            llvm_return_type, function, args_text
+                        ));
+                    }
                 }
-
-                if args.len() != 1 {
-                    panic!("LLVM ERR: 함수 인자는 하나여야 합니다.");
-                }
-
-                let value = self.value(&args[0]);
-
-                let format_string = match (function.as_str(), &value.ty) {
-                    ("print", AirType::I32) => "@.fmt.print.i32",
-                    ("println", AirType::I32) => "@.fmt.println.i32",
-                    ("print", AirType::Str) => "@.fmt.print.str",
-                    ("println", AirType::Str) => "@.fmt.println.str",
-                    ("print", AirType::Bool) => "@.fmt.print.bool",
-                    ("println", AirType::Bool) => "@.fmt.println.bool",
-
-                    (_, AirType::Named(name)) => {
-                        panic!("LLVM ERR: 출력할 수 없는 타입입니다: {name}");
-                    }
-
-                    _ => unreachable!(),
-                };
-
-                let (llvm_type, operand) = match &value.ty {
-                    AirType::I32 => ("i32", value.operand.clone()),
-                    AirType::Str => ("ptr", value.operand.clone()),
-
-                    AirType::Bool => {
-                        ("ptr", self.bool_string_pointer(&value.operand))
-                    }
-
-                    AirType::Named(name) => {
-                        panic!("LLVM ERR: 출력할 수 없는 타입입니다: {name}");
-                    }
-                };
-
-                let call_id = self.next_call;
-                self.next_call += 1;
-
-                self.output.push_str(&format!(
-                    "    %call{} = call i32 (ptr, ...) @printf(ptr {}, {} {})\n",
-                    call_id,
-                    format_string,
-                    llvm_type,
-                    operand
-                ));
             }
 
             AirInstruction::If {
@@ -675,6 +749,7 @@ impl LlvmGenerator {
             AirType::I32 => "i32",
             AirType::Bool => "i1",
             AirType::Str => "ptr",
+            AirType::Void => "void",
             AirType::Named(name) => {
                 panic!("LLVM ERR: 지원하지 않는 타입: {name}");
             }

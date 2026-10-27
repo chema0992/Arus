@@ -17,7 +17,15 @@ pub enum AirMode {
 #[derive(Debug)]
 pub struct AirFunction {
     pub name: String,
+    pub params: Vec<AirParameter>,
+    pub return_type: AirType,
     pub instructions: Vec<AirInstruction>,
+}
+
+#[derive(Debug, Clone)]
+pub struct AirParameter {
+    pub name: String,
+    pub ty: AirType,
 }
 
 #[derive(Debug, Clone)]
@@ -40,6 +48,7 @@ pub enum AirInstruction {
     },
 
     Call {
+        destination: Option<u32>,
         function: String,
         args: Vec<AirValue>,
     },
@@ -111,6 +120,7 @@ pub enum AirType {
     I32,
     Str,
     Bool,
+    Void,
     Named(String),
 }
 
@@ -158,9 +168,32 @@ impl AirGenerator {
             self.generate_stmt(stmt);
         }
 
+        let params = function.params.iter().map(|param| AirParameter {
+            name: param.name.clone(),
+            ty: Self::convert_type(&param.ty),
+        }).collect();
+
+        // 생략된 반환형은 일반 함수에서는 void로, main에서는 i32로 취급한다.
+        // 따라서 사용자가 제시한 fn main() { return x } 문법도 지원한다.
+        let return_type = function.return_type.as_ref().map(Self::convert_type)
+            .unwrap_or_else(|| {
+                if function.name == "main" { AirType::I32 } else { AirType::Void }
+            });
+
         AirFunction {
             name: function.name.clone(),
+            params,
+            return_type,
             instructions: self.instructions.clone(),
+        }
+    }
+
+    fn convert_type(ty: &Type) -> AirType {
+        match ty {
+            Type::I32 => AirType::I32,
+            Type::Str => AirType::Str,
+            Type::Bool => AirType::Bool,
+            Type::Named(name) => AirType::Named(name.clone()),
         }
     }
 
@@ -262,6 +295,7 @@ impl AirGenerator {
                     .collect();
 
                 self.instructions.push(AirInstruction::Call {
+                    destination: None,
                     function: name.clone(),
                     args,
                 });
@@ -343,6 +377,18 @@ impl AirGenerator {
             Expr::Bool(value) => AirValue::Bool(*value),
             Expr::String(value) => AirValue::String(value.clone()),
             Expr::Ident(name) => AirValue::Variable(name.clone()),
+
+            Expr::Call { name, args } => {
+                let args = args.iter().map(|arg| self.generate_expr(arg)).collect();
+                let destination = self.next_temp;
+                self.next_temp += 1;
+                self.instructions.push(AirInstruction::Call {
+                    destination: Some(destination),
+                    function: name.clone(),
+                    args,
+                });
+                AirValue::Temporary(destination)
+            }
 
             Expr::InterpolatedString { .. } => {
                 panic!("AIR ERR: f-string은 아직 구현되지 않았습니다.");
@@ -443,11 +489,14 @@ impl AirPrinter {
         let mut output = String::from("module {\n");
 
         for function in &program.functions {
-            output.push_str(&format!("    {} {{\n", function.name));
-            output.push_str(&Self::print_instructions(
-                &function.instructions,
-                8,
+            let params = function.params.iter()
+                .map(|param| format!("{}: {}", param.name, Self::type_name(&param.ty)))
+                .collect::<Vec<_>>().join(", ");
+            output.push_str(&format!(
+                "    fn {}({}) -> {} {{\n",
+                function.name, params, Self::type_name(&function.return_type)
             ));
+            output.push_str(&Self::print_instructions(&function.instructions, 8));
             output.push_str("    }\n");
         }
 
@@ -571,14 +620,13 @@ impl AirPrinter {
                 format!("{prefix}return {}", Self::print_value(value))
             }
 
-            AirInstruction::Call { function, args } => {
-                let args = args
-                    .iter()
-                    .map(Self::print_value)
-                    .collect::<Vec<_>>()
-                    .join(", ");
-
-                format!("{prefix}call {function}({args})")
+            AirInstruction::Call { destination, function, args } => {
+                let args = args.iter().map(Self::print_value)
+                    .collect::<Vec<_>>().join(", ");
+                match destination {
+                    Some(destination) => format!("{prefix}%{destination} = call {function}({args})"),
+                    None => format!("{prefix}call {function}({args})"),
+                }
             }
 
             AirInstruction::If {
@@ -693,6 +741,7 @@ impl AirPrinter {
             AirType::I32 => "i32".to_string(),
             AirType::Str => "str".to_string(),
             AirType::Bool => "bool".to_string(),
+            AirType::Void => "void".to_string(),
             AirType::Named(name) => name.clone(),
         }
     }
@@ -701,350 +750,97 @@ impl AirPrinter {
 pub struct AirAnalyzer;
 
 impl AirAnalyzer {
+    // AirTypeChecker가 실제 의미/타입 검사를 수행한다.
+    // Analyzer는 이후 메모리/권한 분석이 추가될 자리를 유지하고,
+    // 현재는 각 함수가 검사 파이프라인을 통과했음을 표시한다.
     pub fn analyze(program: &AirProgram) {
         for function in &program.functions {
-            let mut variables = HashMap::new();
-            let mut temporaries = HashMap::new();
-
-            Self::check_instructions(
-                &function.instructions,
-                &mut variables,
-                &mut temporaries,
+            println!(
+                "AIR ANALYZER: fn {}({} params) -> {:?}",
+                function.name,
+                function.params.len(),
+                function.return_type
             );
         }
-    }
-
-    fn check_instructions(
-        instructions: &[AirInstruction],
-        variables: &mut HashMap<String, AirType>,
-        temporaries: &mut HashMap<u32, AirType>,
-    ) {
-        for instruction in instructions {
-            match instruction {
-                AirInstruction::Binary {
-                    destination,
-                    operator,
-                    left,
-                    right,
-                } => {
-                    let left_type = Self::value_type(left, variables, temporaries);
-                    let right_type = Self::value_type(right, variables, temporaries);
-
-                    let result_type = match operator {
-                        AirBinaryOp::Add
-                        | AirBinaryOp::Sub
-                        | AirBinaryOp::Mul
-                        | AirBinaryOp::Div => {
-                            if left_type != AirType::I32
-                                || right_type != AirType::I32
-                            {
-                                panic!(
-                                    "AIR ERR: 산술 연산에는 i32 피연산자가 필요합니다."
-                                );
-                            }
-
-                            AirType::I32
-                        }
-
-                        AirBinaryOp::Equal | AirBinaryOp::NotEqual => {
-                            if left_type != right_type {
-                                panic!(
-                                    "AIR ERR: 비교 연산의 양쪽 타입이 다릅니다."
-                                );
-                            }
-
-                            match left_type {
-                                AirType::I32 | AirType::Bool => AirType::Bool,
-                                _ => panic!(
-                                    "AIR ERR: ==와 !=는 현재 i32와 bool만 지원합니다."
-                                ),
-                            }
-                        }
-
-                        AirBinaryOp::Less
-                        | AirBinaryOp::Greater
-                        | AirBinaryOp::LessEqual
-                        | AirBinaryOp::GreaterEqual => {
-                            if left_type != AirType::I32
-                                || right_type != AirType::I32
-                            {
-                                panic!(
-                                    "AIR ERR: 크기 비교에는 i32 피연산자가 필요합니다."
-                                );
-                            }
-
-                            AirType::Bool
-                        }
-                    };
-
-                    temporaries.insert(*destination, result_type);
-                    println!("AIR CHECK: %{destination} OK");
-                }
-
-                AirInstruction::Unary {
-                    destination,
-                    operator,
-                    operand,
-                } => {
-                    let operand_type =
-                        Self::value_type(
-                            operand,
-                            variables,
-                            temporaries,
-                        );
-
-                    match operator {
-                        AirUnaryOp::Not => {
-                            if operand_type != AirType::Bool {
-                                panic!(
-                                    "AIR ERR: '!' 연산에는 bool 값이 필요합니다."
-                                );
-                            }
-                        }
-                    }
-
-                    temporaries.insert(
-                        *destination,
-                        AirType::Bool,
-                    );
-
-                    println!(
-                        "AIR CHECK: %{destination} not OK"
-                    );
-                }
-
-                AirInstruction::Let { name, ty, value } => {
-                    let actual_type =
-                        Self::value_type(value, variables, temporaries);
-
-                    let variable_type = match ty {
-                        Some(declared_type) => {
-                            if *declared_type != actual_type {
-                                panic!(
-                                    "AIR ERR: 변수 '{name}'의 선언 타입과 값의 타입이 다릅니다."
-                                );
-                            }
-
-                            declared_type.clone()
-                        }
-
-                        None => actual_type,
-                    };
-
-                    variables.insert(name.clone(), variable_type);
-                    println!("AIR CHECK: let {name} OK");
-                }
-
-                AirInstruction::Return { value } => {
-                    Self::value_type(value, variables, temporaries);
-                    println!("AIR CHECK: return OK");
-                }
-
-                AirInstruction::Call { function, args } => {
-                    if function != "print" && function != "println" {
-                        panic!("AIR ERR: 지원하지 않는 함수: {function}");
-                    }
-
-                    if args.len() != 1 {
-                        panic!("AIR ERR: 함수 인자는 하나여야 합니다.");
-                    }
-
-                    for arg in args {
-                        Self::value_type(arg, variables, temporaries);
-                    }
-
-                    println!("AIR CHECK: call {function} OK");
-                }
-
-                AirInstruction::Logical {
-                    destination,
-                    operator: _,
-                    left_instructions,
-                    left,
-                    right_instructions,
-                    right,
-                } => {
-                    // 왼쪽 식을 검사한다.
-                    let mut left_variables = variables.clone();
-                    let mut left_temporaries =
-                        temporaries.clone();
-
-                    Self::check_instructions(
-                        left_instructions,
-                        &mut left_variables,
-                        &mut left_temporaries,
-                    );
-
-                    let left_type = Self::value_type(
-                        left,
-                        &left_variables,
-                        &left_temporaries,
-                    );
-
-                    if left_type != AirType::Bool {
-                        panic!(
-                            "AIR ERR: 논리 연산의 왼쪽 값에는 bool 타입이 필요합니다."
-                        );
-                    }
-
-                    // 오른쪽 식도 정적으로 검사한다.
-                    // 다만 실제 실행 시점에는 단락 평가로 생략될 수 있다.
-                    let mut right_variables = variables.clone();
-                    let mut right_temporaries =
-                        temporaries.clone();
-
-                    Self::check_instructions(
-                        right_instructions,
-                        &mut right_variables,
-                        &mut right_temporaries,
-                    );
-
-                    let right_type = Self::value_type(
-                        right,
-                        &right_variables,
-                        &right_temporaries,
-                    );
-
-                    if right_type != AirType::Bool {
-                        panic!(
-                            "AIR ERR: 논리 연산의 오른쪽 값에는 bool 타입이 필요합니다."
-                        );
-                    }
-
-                    temporaries.insert(
-                        *destination,
-                        AirType::Bool,
-                    );
-
-                    println!(
-                        "AIR CHECK: %{destination} logical OK"
-                    );
-                }
-
-                AirInstruction::If {
-                    condition,
-                    then_body,
-                    else_body,
-                } => {
-                    let condition_type =
-                        Self::value_type(condition, variables, temporaries);
-
-                    if condition_type != AirType::Bool {
-                        panic!(
-                            "AIR ERR: if 조건식에는 bool 타입이 필요합니다."
-                        );
-                    }
-
-                    let mut then_variables = variables.clone();
-                    let mut then_temporaries = temporaries.clone();
-
-                    Self::check_instructions(
-                        then_body,
-                        &mut then_variables,
-                        &mut then_temporaries,
-                    );
-
-                    if let Some(else_body) = else_body {
-                        let mut else_variables = variables.clone();
-                        let mut else_temporaries = temporaries.clone();
-
-                        Self::check_instructions(
-                            else_body,
-                            &mut else_variables,
-                            &mut else_temporaries,
-                        );
-                    }
-
-                    println!("AIR CHECK: if OK");
-                }
-
-                AirInstruction::While {
-                    condition_instructions,
-                    condition,
-                    body,
-                } => {
-                    // 반복 조건식에서 생성된 임시값을 검사한다.
-                    let mut condition_temporaries =
-                        temporaries.clone();
-
-                    Self::check_instructions(
-                        condition_instructions,
-                        variables,
-                        &mut condition_temporaries,
-                    );
-
-                    // while 조건은 bool이어야 한다.
-                    let condition_type = Self::value_type(
-                        condition,
-                        variables,
-                        &condition_temporaries,
-                    );
-
-                    if condition_type != AirType::Bool {
-                        panic!(
-                            "AIR ERR: while 조건식에는 bool 타입이 필요합니다."
-                        );
-                    }
-
-                    // 반복문 안의 변수 환경은 별도로 검사한다.
-                    let mut body_variables = variables.clone();
-                    let mut body_temporaries = temporaries.clone();
-
-                    Self::check_instructions(
-                        body,
-                        &mut body_variables,
-                        &mut body_temporaries,
-                    );
-
-                    println!("AIR CHECK: while OK");
-                }
-            }
-        }
-    }
-
-    fn value_type(
-        value: &AirValue,
-        variables: &HashMap<String, AirType>,
-        temporaries: &HashMap<u32, AirType>,
-    ) -> AirType {
-        match value {
-            AirValue::Integer(_) => AirType::I32,
-            AirValue::Bool(_) => AirType::Bool,
-            AirValue::String(_) => AirType::Str,
-
-            AirValue::Variable(name) => variables
-                .get(name)
-                .cloned()
-                .unwrap_or_else(|| {
-                    panic!("AIR ERR: 정의되지 않은 변수: {name}")
-                }),
-
-            AirValue::Temporary(temp) => temporaries
-                .get(temp)
-                .cloned()
-                .unwrap_or_else(|| {
-                    panic!("AIR ERR: 정의되지 않은 임시값: %{temp}")
-                }),
-        }
+        println!("AIR ANALYZER: 완료");
     }
 }
 
 pub struct AirTypeChecker;
 
+type FunctionSignatures = HashMap<String, (Vec<AirType>, AirType)>;
+
 impl AirTypeChecker {
     pub fn check(program: &AirProgram) -> Result<(), String> {
+        let mut signatures = FunctionSignatures::new();
+
+        // 모든 시그니처를 먼저 등록하므로 함수의 선언 순서와 재귀 호출에 의존하지 않는다.
         for function in &program.functions {
+            if function.name == "print" || function.name == "println" {
+                return Err(format!(
+                    "AIR Type ERR: '{}'는 내장 함수 이름이므로 재정의할 수 없습니다.",
+                    function.name
+                ));
+            }
+
+            let signature = (
+                function.params.iter().map(|param| param.ty.clone()).collect(),
+                function.return_type.clone(),
+            );
+
+            if signatures.insert(function.name.clone(), signature).is_some() {
+                return Err(format!(
+                    "AIR Type ERR: 함수 '{}'가 중복 선언되었습니다.",
+                    function.name
+                ));
+            }
+        }
+
+        for function in &program.functions {
+            if function.name == "main" {
+                if !function.params.is_empty() {
+                    return Err("AIR Type ERR: main 함수는 매개변수를 받을 수 없습니다.".to_string());
+                }
+                if function.return_type != AirType::I32 {
+                    return Err("AIR Type ERR: main 함수의 반환형은 i32여야 합니다.".to_string());
+                }
+            }
+
+            for param in &function.params {
+                if matches!(&param.ty, AirType::Named(_) | AirType::Void) {
+                    return Err(format!(
+                        "AIR Type ERR: 매개변수 '{}'의 타입 {:?}은 아직 지원되지 않습니다.",
+                        param.name, param.ty
+                    ));
+                }
+            }
+            if matches!(&function.return_type, AirType::Named(_)) {
+                return Err(format!(
+                    "AIR Type ERR: 함수 '{}'의 반환형 {:?}은 아직 지원되지 않습니다.",
+                    function.name, function.return_type
+                ));
+            }
+
             let mut variables = HashMap::<String, AirType>::new();
             let mut temporaries = HashMap::<u32, AirType>::new();
+
+            for param in &function.params {
+                if variables.insert(param.name.clone(), param.ty.clone()).is_some() {
+                    return Err(format!(
+                        "함수 '{}': AIR Type ERR: 매개변수 '{}'가 중복되었습니다.",
+                        function.name, param.name
+                    ));
+                }
+            }
 
             Self::check_instructions(
                 &function.instructions,
                 &mut variables,
                 &mut temporaries,
+                &signatures,
+                &function.return_type,
             )
-            .map_err(|error| {
-                format!("함수 '{}': {}", function.name, error)
-            })?;
+            .map_err(|error| format!("함수 '{}': {}", function.name, error))?;
         }
 
         Ok(())
@@ -1059,26 +855,12 @@ impl AirTypeChecker {
             AirValue::Integer(_) => Ok(AirType::I32),
             AirValue::Bool(_) => Ok(AirType::Bool),
             AirValue::String(_) => Ok(AirType::Str),
-
-            AirValue::Variable(name) => variables
-                .get(name)
-                .cloned()
-                .ok_or_else(|| {
-                    format!(
-                        "AIR Type ERR: 선언되지 않은 변수 '{}'",
-                        name
-                    )
-                }),
-
-            AirValue::Temporary(id) => temporaries
-                .get(id)
-                .cloned()
-                .ok_or_else(|| {
-                    format!(
-                        "AIR Type ERR: 타입을 알 수 없는 임시값 %{}",
-                        id
-                    )
-                }),
+            AirValue::Variable(name) => variables.get(name).cloned().ok_or_else(|| {
+                format!("AIR Type ERR: 선언되지 않은 변수 '{}'", name)
+            }),
+            AirValue::Temporary(id) => temporaries.get(id).cloned().ok_or_else(|| {
+                format!("AIR Type ERR: 타입을 알 수 없는 임시값 %{}", id)
+            }),
         }
     }
 
@@ -1086,269 +868,241 @@ impl AirTypeChecker {
         instructions: &[AirInstruction],
         variables: &mut HashMap<String, AirType>,
         temporaries: &mut HashMap<u32, AirType>,
+        signatures: &FunctionSignatures,
+        return_type: &AirType,
     ) -> Result<(), String> {
         for instruction in instructions {
             match instruction {
-                AirInstruction::Binary {
-                    destination,
-                    operator,
-                    left,
-                    right,
-                } => {
-                    let left_type =
-                        Self::value_type(left, variables, temporaries)?;
-
-                    let right_type =
-                        Self::value_type(right, variables, temporaries)?;
+                AirInstruction::Binary { destination, operator, left, right } => {
+                    let left_type = Self::value_type(left, variables, temporaries)?;
+                    let right_type = Self::value_type(right, variables, temporaries)?;
 
                     let result_type = match operator {
-                        AirBinaryOp::Add
-                        | AirBinaryOp::Sub
-                        | AirBinaryOp::Mul
-                        | AirBinaryOp::Div => {
-                            if left_type != AirType::I32
-                                || right_type != AirType::I32
-                            {
+                        AirBinaryOp::Add | AirBinaryOp::Sub | AirBinaryOp::Mul | AirBinaryOp::Div => {
+                            if left_type != AirType::I32 || right_type != AirType::I32 {
                                 return Err(format!(
-                                    "AIR Type ERR: {:?} 연산은 i32가 \
-                                     필요합니다. 왼쪽: {:?}, 오른쪽: {:?}",
+                                    "AIR Type ERR: {:?} 연산은 i32가 필요합니다. 왼쪽: {:?}, 오른쪽: {:?}",
                                     operator, left_type, right_type
                                 ));
                             }
-
                             AirType::I32
                         }
-
-                        AirBinaryOp::Less
-                        | AirBinaryOp::Greater
-                        | AirBinaryOp::LessEqual
-                        | AirBinaryOp::GreaterEqual => {
-                            if left_type != AirType::I32
-                                || right_type != AirType::I32
-                            {
+                        AirBinaryOp::Less | AirBinaryOp::Greater | AirBinaryOp::LessEqual | AirBinaryOp::GreaterEqual => {
+                            if left_type != AirType::I32 || right_type != AirType::I32 {
                                 return Err(format!(
-                                    "AIR Type ERR: 비교 연산은 i32가 \
-                                     필요합니다. 왼쪽: {:?}, 오른쪽: {:?}",
+                                    "AIR Type ERR: 크기 비교는 i32가 필요합니다. 왼쪽: {:?}, 오른쪽: {:?}",
                                     left_type, right_type
                                 ));
                             }
-
                             AirType::Bool
                         }
-
-                        AirBinaryOp::Equal
-                        | AirBinaryOp::NotEqual => {
+                        AirBinaryOp::Equal | AirBinaryOp::NotEqual => {
                             if left_type != right_type {
                                 return Err(format!(
-                                    "AIR Type ERR: {:?} 연산의 양쪽 \
-                                     타입이 다릅니다. 왼쪽: {:?}, \
-                                     오른쪽: {:?}",
+                                    "AIR Type ERR: {:?} 연산의 양쪽 타입이 다릅니다. 왼쪽: {:?}, 오른쪽: {:?}",
                                     operator, left_type, right_type
                                 ));
                             }
-
-                            AirType::Bool
+                            match left_type {
+                                AirType::I32 | AirType::Bool => AirType::Bool,
+                                _ => return Err(format!(
+                                    "AIR Type ERR: ==와 !=는 현재 i32와 bool만 지원합니다. 실제 타입: {:?}",
+                                    left_type
+                                )),
+                            }
                         }
                     };
-
                     temporaries.insert(*destination, result_type);
                 }
 
-                AirInstruction::Unary {
-                    destination,
-                    operator,
-                    operand,
-                } => {
-                    let operand_type =
-                        Self::value_type(operand, variables, temporaries)?;
-
+                AirInstruction::Unary { destination, operator, operand } => {
+                    let operand_type = Self::value_type(operand, variables, temporaries)?;
                     match operator {
-                        AirUnaryOp::Not => {
-                            if operand_type != AirType::Bool {
-                                return Err(format!(
-                                    "AIR Type ERR: ! 연산은 bool이 \
-                                     필요합니다. 실제 타입: {:?}",
-                                    operand_type
-                                ));
-                            }
+                        AirUnaryOp::Not if operand_type != AirType::Bool => {
+                            return Err(format!(
+                                "AIR Type ERR: ! 연산은 bool이 필요합니다. 실제 타입: {:?}",
+                                operand_type
+                            ));
                         }
+                        AirUnaryOp::Not => {}
                     }
-
                     temporaries.insert(*destination, AirType::Bool);
                 }
 
                 AirInstruction::Logical {
-                    destination,
-                    operator,
-                    left_instructions,
-                    left,
-                    right_instructions,
-                    right,
+                    destination, operator, left_instructions, left, right_instructions, right,
                 } => {
-                    // 왼쪽 식을 독립적으로 검사한다.
                     let mut left_variables = variables.clone();
                     let mut left_temporaries = temporaries.clone();
-
                     Self::check_instructions(
-                        left_instructions,
-                        &mut left_variables,
-                        &mut left_temporaries,
+                        left_instructions, &mut left_variables, &mut left_temporaries,
+                        signatures, return_type,
                     )?;
-
-                    let left_type = Self::value_type(
-                        left,
-                        &left_variables,
-                        &left_temporaries,
-                    )?;
-
+                    let left_type = Self::value_type(left, &left_variables, &left_temporaries)?;
                     if left_type != AirType::Bool {
                         return Err(format!(
-                            "AIR Type ERR: {:?} 연산의 왼쪽 값은 \
-                             bool이어야 합니다. 실제 타입: {:?}",
+                            "AIR Type ERR: {:?} 연산의 왼쪽 값은 bool이어야 합니다. 실제 타입: {:?}",
                             operator, left_type
                         ));
                     }
 
-                    // 오른쪽 식도 정적 타입 검사는 수행한다.
-                    // 실행 시 평가 여부는 LLVM의 단락 평가가 결정한다.
                     let mut right_variables = variables.clone();
                     let mut right_temporaries = temporaries.clone();
-
                     Self::check_instructions(
-                        right_instructions,
-                        &mut right_variables,
-                        &mut right_temporaries,
+                        right_instructions, &mut right_variables, &mut right_temporaries,
+                        signatures, return_type,
                     )?;
-
-                    let right_type = Self::value_type(
-                        right,
-                        &right_variables,
-                        &right_temporaries,
-                    )?;
-
+                    let right_type = Self::value_type(right, &right_variables, &right_temporaries)?;
                     if right_type != AirType::Bool {
                         return Err(format!(
-                            "AIR Type ERR: {:?} 연산의 오른쪽 값은 \
-                             bool이어야 합니다. 실제 타입: {:?}",
+                            "AIR Type ERR: {:?} 연산의 오른쪽 값은 bool이어야 합니다. 실제 타입: {:?}",
                             operator, right_type
                         ));
                     }
-
                     temporaries.insert(*destination, AirType::Bool);
                 }
 
                 AirInstruction::Let { name, ty, value } => {
-                    let actual_type =
-                        Self::value_type(value, variables, temporaries)?;
-
-                    if let Some(expected_type) = ty {
+                    let actual_type = Self::value_type(value, variables, temporaries)?;
+                    if actual_type == AirType::Void {
+                        return Err(format!(
+                            "AIR Type ERR: void 함수 호출 결과를 변수 '{}'에 저장할 수 없습니다.", name
+                        ));
+                    }
+                    let variable_type = if let Some(expected_type) = ty {
                         if expected_type != &actual_type {
                             return Err(format!(
-                                "AIR Type ERR: 변수 '{}'의 타입이 \
-                                 일치하지 않습니다. 선언: {:?}, 실제: {:?}",
+                                "AIR Type ERR: 변수 '{}'의 타입이 일치하지 않습니다. 선언: {:?}, 실제: {:?}",
                                 name, expected_type, actual_type
                             ));
                         }
-
-                        variables.insert(name.clone(), expected_type.clone());
+                        expected_type.clone()
                     } else {
-                        // 타입을 명시하지 않았다면 초기값으로 추론한다.
-                        variables.insert(name.clone(), actual_type);
-                    }
+                        actual_type
+                    };
+                    variables.insert(name.clone(), variable_type);
                 }
 
                 AirInstruction::Return { value } => {
-                    // 반환값의 존재 여부 및 타입을 검사한다.
-                    // 함수 반환 타입 서명은 아직 AIR에 없으므로
-                    // 함수 선언과 반환값의 타입 일치는 아직 검사하지 않는다.
-                    Self::value_type(value, variables, temporaries)?;
-                }
-
-                AirInstruction::Call { args, .. } => {
-                    for arg in args {
-                        Self::value_type(arg, variables, temporaries)?;
+                    let actual_type = Self::value_type(value, variables, temporaries)?;
+                    if *return_type == AirType::Void {
+                        return Err(
+                            "AIR Type ERR: 반환형이 생략된 일반 함수(void)에서는 값을 반환할 수 없습니다."
+                                .to_string(),
+                        );
                     }
-                }
-
-                AirInstruction::If {
-                    condition,
-                    then_body,
-                    else_body,
-                } => {
-                    let condition_type =
-                        Self::value_type(condition, variables, temporaries)?;
-
-                    if condition_type != AirType::Bool {
+                    if actual_type != *return_type {
                         return Err(format!(
-                            "AIR Type ERR: if 조건은 bool이어야 합니다. \
-                             실제 타입: {:?}",
-                            condition_type
+                            "AIR Type ERR: 반환 타입이 일치하지 않습니다. 선언: {:?}, 실제: {:?}",
+                            return_type, actual_type
                         ));
                     }
+                }
 
-                    // 분기 내부의 변수 선언이 바깥으로 새지 않게 한다.
+                AirInstruction::Call { destination, function, args } => {
+                    let arg_types = args.iter()
+                        .map(|arg| Self::value_type(arg, variables, temporaries))
+                        .collect::<Result<Vec<_>, _>>()?;
+
+                    if function == "print" || function == "println" {
+                        if destination.is_some() {
+                            return Err(format!(
+                                "AIR Type ERR: 내장 함수 '{}'는 식의 값으로 사용할 수 없습니다.", function
+                            ));
+                        }
+                        if args.len() != 1 {
+                            return Err(format!(
+                                "AIR Type ERR: '{}'에는 인자 하나가 필요합니다.", function
+                            ));
+                        }
+                        if arg_types[0] != AirType::I32
+                            && arg_types[0] != AirType::Str
+                            && arg_types[0] != AirType::Bool
+                        {
+                            return Err(format!(
+                                "AIR Type ERR: '{}'에서 지원하지 않는 인자 타입입니다: {:?}",
+                                function, arg_types[0]
+                            ));
+                        }
+                    } else {
+                        let (param_types, result_type) = signatures.get(function).ok_or_else(|| {
+                            format!("AIR Type ERR: 선언되지 않은 함수 '{}'", function)
+                        })?;
+
+                        if arg_types.len() != param_types.len() {
+                            return Err(format!(
+                                "AIR Type ERR: 함수 '{}'는 인자 {}개를 받지만 {}개가 전달되었습니다.",
+                                function, param_types.len(), arg_types.len()
+                            ));
+                        }
+                        for (index, (actual, expected)) in arg_types.iter().zip(param_types).enumerate() {
+                            if actual != expected {
+                                return Err(format!(
+                                    "AIR Type ERR: 함수 '{}'의 {}번째 인자 타입이 다릅니다. 기대: {:?}, 실제: {:?}",
+                                    function, index + 1, expected, actual
+                                ));
+                            }
+                        }
+
+                        if let Some(destination) = destination {
+                            if *result_type == AirType::Void {
+                                return Err(format!(
+                                    "AIR Type ERR: 반환값이 없는 함수 '{}'를 식 안에서 사용할 수 없습니다.",
+                                    function
+                                ));
+                            }
+                            temporaries.insert(*destination, result_type.clone());
+                        }
+                    }
+                }
+
+                AirInstruction::If { condition, then_body, else_body } => {
+                    let condition_type = Self::value_type(condition, variables, temporaries)?;
+                    if condition_type != AirType::Bool {
+                        return Err(format!(
+                            "AIR Type ERR: if 조건은 bool이어야 합니다. 실제 타입: {:?}", condition_type
+                        ));
+                    }
                     let mut then_variables = variables.clone();
                     let mut then_temporaries = temporaries.clone();
-
                     Self::check_instructions(
-                        then_body,
-                        &mut then_variables,
-                        &mut then_temporaries,
+                        then_body, &mut then_variables, &mut then_temporaries,
+                        signatures, return_type,
                     )?;
-
                     if let Some(else_body) = else_body {
                         let mut else_variables = variables.clone();
                         let mut else_temporaries = temporaries.clone();
-
                         Self::check_instructions(
-                            else_body,
-                            &mut else_variables,
-                            &mut else_temporaries,
+                            else_body, &mut else_variables, &mut else_temporaries,
+                            signatures, return_type,
                         )?;
                     }
                 }
 
-                AirInstruction::While {
-                    condition_instructions,
-                    condition,
-                    body,
-                } => {
-                    // 반복할 때마다 평가되는 조건식 검사
+                AirInstruction::While { condition_instructions, condition, body } => {
                     let mut condition_variables = variables.clone();
                     let mut condition_temporaries = temporaries.clone();
-
                     Self::check_instructions(
-                        condition_instructions,
-                        &mut condition_variables,
-                        &mut condition_temporaries,
+                        condition_instructions, &mut condition_variables, &mut condition_temporaries,
+                        signatures, return_type,
                     )?;
-
                     let condition_type = Self::value_type(
-                        condition,
-                        &condition_variables,
-                        &condition_temporaries,
+                        condition, &condition_variables, &condition_temporaries,
                     )?;
-
                     if condition_type != AirType::Bool {
                         return Err(format!(
-                            "AIR Type ERR: while 조건은 bool이어야 합니다. \
-                             실제 타입: {:?}",
-                            condition_type
+                            "AIR Type ERR: while 조건은 bool이어야 합니다. 실제 타입: {:?}", condition_type
                         ));
                     }
-
                     let mut body_variables = variables.clone();
                     let mut body_temporaries = temporaries.clone();
-
                     Self::check_instructions(
-                        body,
-                        &mut body_variables,
-                        &mut body_temporaries,
+                        body, &mut body_variables, &mut body_temporaries,
+                        signatures, return_type,
                     )?;
                 }
             }
         }
-
         Ok(())
     }
 }

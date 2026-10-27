@@ -32,8 +32,13 @@ impl Lexer {
                     Token::Plus
                 }
                 '-' => {
-                    self.position += 1;
-                    Token::Minus
+                    if self.input.get(self.position + 1) == Some(&'>') {
+                        self.position += 2;
+                        Token::Arrow
+                    } else {
+                        self.position += 1;
+                        Token::Minus
+                    }
                 }
                 '*' => {
                     self.position += 1;
@@ -105,6 +110,10 @@ impl Lexer {
                 ':' => {
                     self.position += 1;
                     Token::Colon
+                }
+                ',' => {
+                    self.position += 1;
+                    Token::Comma
                 }
                 '(' => {
                     self.position += 1;

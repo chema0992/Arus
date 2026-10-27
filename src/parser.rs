@@ -1,4 +1,3 @@
-
 use crate::ast::*;
 use crate::token::Token;
 
@@ -9,10 +8,7 @@ pub struct Parser {
 
 impl Parser {
     pub fn new(tokens: Vec<Token>) -> Self {
-        Self {
-            tokens,
-            position: 0,
-        }
+        Self { tokens, position: 0 }
     }
 
     pub fn parse(&mut self) -> Program {
@@ -23,7 +19,6 @@ impl Parser {
         };
 
         let mut functions = Vec::new();
-
         while *self.peek() != Token::EOF {
             functions.push(self.parse_function());
         }
@@ -45,20 +40,52 @@ impl Parser {
 
         match self.advance() {
             Token::LeftParen => {}
-            _ => panic!("Parser ERR: '('가 필요합니다."),
+            _ => panic!("Parser ERR: 함수 이름 뒤에 '('가 필요합니다."),
+        }
+
+        let mut params = Vec::new();
+        if *self.peek() != Token::RightParen {
+            loop {
+                let param_name = match self.advance() {
+                    Token::Ident(name) => name,
+                    _ => panic!("Parser ERR: 매개변수 이름이 필요합니다."),
+                };
+
+                match self.advance() {
+                    Token::Colon => {}
+                    _ => panic!("Parser ERR: 매개변수 이름 뒤에 ':'가 필요합니다."),
+                }
+
+                let ty = self.parse_type();
+                params.push(Parameter { name: param_name, ty });
+
+                if *self.peek() == Token::Comma {
+                    self.advance();
+                    if *self.peek() == Token::RightParen {
+                        panic!("Parser ERR: 매개변수 뒤에 불필요한 ','가 있습니다.");
+                    }
+                } else {
+                    break;
+                }
+            }
         }
 
         match self.advance() {
             Token::RightParen => {}
-            _ => panic!("Parser ERR: ')'가 필요합니다."),
+            _ => panic!("Parser ERR: 매개변수 목록을 닫는 ')'가 필요합니다."),
         }
 
-        let body = self.parse_block();
+        let return_type = if *self.peek() == Token::Arrow {
+            self.advance();
+            Some(self.parse_type())
+        } else {
+            None
+        };
 
-        Function { name, body }
+        let body = self.parse_block();
+        Function { name, params, return_type, body }
     }
 
-    // { ... } 블록을 파싱한다.
     fn parse_block(&mut self) -> Vec<Stmt> {
         match self.advance() {
             Token::LeftBrace => {}
@@ -66,22 +93,16 @@ impl Parser {
         }
 
         let mut body = Vec::new();
-
         loop {
             match self.peek() {
                 Token::RightBrace => {
                     self.advance();
                     break;
                 }
-
-                Token::EOF => {
-                    panic!("Parser ERR: 블록의 닫는 '}}'가 없습니다.");
-                }
-
+                Token::EOF => panic!("Parser ERR: 블록의 닫는 '}}'가 없습니다."),
                 _ => body.push(self.parse_statement()),
             }
         }
-
         body
     }
 
@@ -92,11 +113,7 @@ impl Parser {
             Token::If => self.parse_if(),
             Token::While => self.parse_while(),
             Token::Ident(_) => self.parse_call_statement(),
-
-            _ => panic!(
-                "Parser ERR: 알 수 없는 문장입니다: {:?}",
-                self.peek()
-            ),
+            _ => panic!("Parser ERR: 알 수 없는 문장입니다: {:?}", self.peek()),
         }
     }
 
@@ -109,7 +126,6 @@ impl Parser {
 
         let condition = self.parse_expression();
         let then_body = self.parse_block();
-
         let else_body = if *self.peek() == Token::Else {
             self.advance();
             Some(self.parse_else_body())
@@ -117,37 +133,23 @@ impl Parser {
             None
         };
 
-        Stmt::If {
-            condition,
-            then_body,
-            else_body,
-        }
+        Stmt::If { condition, then_body, else_body }
     }
 
-    // else if의 연결 구조를 ElseBody AST로 만든다.
     fn parse_else_body(&mut self) -> ElseBody {
         if *self.peek() == Token::If {
             self.advance();
-
             let condition = self.parse_expression();
             let body = self.parse_block();
-
             let next = if *self.peek() == Token::Else {
                 self.advance();
                 Some(Box::new(self.parse_else_body()))
             } else {
                 None
             };
-
-            ElseBody::ElseIf {
-                condition,
-                body,
-                next,
-            }
+            ElseBody::ElseIf { condition, body, next }
         } else if *self.peek() == Token::LeftBrace {
-            ElseBody::Else {
-                body: self.parse_block(),
-            }
+            ElseBody::Else { body: self.parse_block() }
         } else {
             panic!(
                 "Parser ERR: else 뒤에는 if 또는 '{{'가 필요합니다. 현재 토큰: {:?}",
@@ -161,14 +163,9 @@ impl Parser {
             Token::While => {}
             _ => unreachable!(),
         }
-
         let condition = self.parse_expression();
         let body = self.parse_block();
-
-        Stmt::While {
-            condition,
-            body,
-        }
+        Stmt::While { condition, body }
     }
 
     fn parse_call_statement(&mut self) -> Stmt {
@@ -176,56 +173,60 @@ impl Parser {
             Token::Ident(name) => name,
             _ => panic!("Parser ERR: 함수 이름이 필요합니다."),
         };
-
         match self.advance() {
             Token::LeftParen => {}
-            _ => panic!("Parser ERR: '('가 필요합니다."),
+            _ => panic!("Parser ERR: 함수 호출에 '('가 필요합니다."),
         }
+        let args = self.parse_call_arguments();
+        Stmt::Call { name, args }
+    }
 
+    // '('를 이미 소비한 상태에서 인자 목록을 파싱한다.
+    fn parse_call_arguments(&mut self) -> Vec<Expr> {
         let mut args = Vec::new();
-
         if *self.peek() != Token::RightParen {
-            args.push(self.parse_expression());
+            loop {
+                args.push(self.parse_expression());
+                if *self.peek() == Token::Comma {
+                    self.advance();
+                    if *self.peek() == Token::RightParen {
+                        panic!("Parser ERR: 함수 인자 뒤에 불필요한 ','가 있습니다.");
+                    }
+                } else {
+                    break;
+                }
+            }
         }
 
         match self.advance() {
-            Token::RightParen => {}
-            _ => panic!("Parser ERR: ')'가 필요합니다."),
+            Token::RightParen => args,
+            _ => panic!("Parser ERR: 함수 호출 인자 목록에 ')'가 필요합니다."),
         }
-
-        Stmt::Call { name, args }
     }
 
     fn parse_let(&mut self) -> Stmt {
         self.advance();
-
         let name = match self.advance() {
             Token::Ident(name) => name,
             _ => panic!("Parser ERR: 변수 이름이 필요합니다."),
         };
-
         let ty = if *self.peek() == Token::Colon {
             self.advance();
             Some(self.parse_type())
         } else {
             None
         };
-
         match self.advance() {
             Token::Equal => {}
             _ => panic!("Parser ERR: '='가 필요합니다."),
         }
-
         let value = self.parse_expression();
-
         Stmt::Let { name, ty, value }
     }
 
     fn parse_return(&mut self) -> Stmt {
         self.advance();
-
         let value = self.parse_expression();
-
         Stmt::Return(value)
     }
 
@@ -239,79 +240,53 @@ impl Parser {
         }
     }
 
-    // 비교 연산자: == != < > <= >=
     fn parse_expression(&mut self) -> Expr {
         self.parse_logical_or()
     }
 
     fn parse_logical_or(&mut self) -> Expr {
         let mut expr = self.parse_logical_and();
-
         loop {
-            if *self.peek() != Token::OrOr {
-                break;
-            }
-
+            if *self.peek() != Token::OrOr { break; }
             self.advance();
             let right = self.parse_logical_and();
-
             expr = Expr::Binary {
-                left: Box::new(expr),
-                operator: BinaryOp::Or,
-                right: Box::new(right),
+                left: Box::new(expr), operator: BinaryOp::Or, right: Box::new(right),
             };
         }
-
         expr
     }
 
     fn parse_logical_and(&mut self) -> Expr {
         let mut expr = self.parse_equality();
-
         loop {
-            if *self.peek() != Token::AndAnd {
-                break;
-            }
-
+            if *self.peek() != Token::AndAnd { break; }
             self.advance();
             let right = self.parse_equality();
-
             expr = Expr::Binary {
-                left: Box::new(expr),
-                operator: BinaryOp::And,
-                right: Box::new(right),
+                left: Box::new(expr), operator: BinaryOp::And, right: Box::new(right),
             };
         }
-
         expr
     }
 
     fn parse_equality(&mut self) -> Expr {
         let mut expr = self.parse_comparison();
-
         loop {
             let operator = match self.peek() {
                 Token::EqualEqual => BinaryOp::Equal,
                 Token::BangEqual => BinaryOp::NotEqual,
                 _ => break,
             };
-
             self.advance();
             let right = self.parse_comparison();
-
-            expr = Expr::Binary {
-                left: Box::new(expr),
-                operator,
-                right: Box::new(right),
-            };
+            expr = Expr::Binary { left: Box::new(expr), operator, right: Box::new(right) };
         }
-
         expr
     }
 
     fn parse_comparison(&mut self) -> Expr {
         let mut expr = self.parse_additive();
-
         loop {
             let operator = match self.peek() {
                 Token::Less => BinaryOp::Less,
@@ -320,82 +295,49 @@ impl Parser {
                 Token::GreaterEqual => BinaryOp::GreaterEqual,
                 _ => break,
             };
-
             self.advance();
             let right = self.parse_additive();
-
-            expr = Expr::Binary {
-                left: Box::new(expr),
-                operator,
-                right: Box::new(right),
-            };
+            expr = Expr::Binary { left: Box::new(expr), operator, right: Box::new(right) };
         }
-
         expr
     }
 
-    // 덧셈과 뺄셈
     fn parse_additive(&mut self) -> Expr {
         let mut expr = self.parse_term();
-
         loop {
             let operator = match self.peek() {
                 Token::Plus => BinaryOp::Add,
                 Token::Minus => BinaryOp::Sub,
                 _ => break,
             };
-
             self.advance();
-
             let right = self.parse_term();
-
-            expr = Expr::Binary {
-                left: Box::new(expr),
-                operator,
-                right: Box::new(right),
-            };
+            expr = Expr::Binary { left: Box::new(expr), operator, right: Box::new(right) };
         }
-
         expr
     }
 
-    // 곱셈과 나눗셈
     fn parse_term(&mut self) -> Expr {
         let mut expr = self.parse_unary();
-
         loop {
             let operator = match self.peek() {
                 Token::Star => BinaryOp::Mul,
                 Token::Slash => BinaryOp::Div,
                 _ => break,
             };
-
             self.advance();
-
             let right = self.parse_unary();
-
-            expr = Expr::Binary {
-                left: Box::new(expr),
-                operator,
-                right: Box::new(right),
-            };
+            expr = Expr::Binary { left: Box::new(expr), operator, right: Box::new(right) };
         }
-
         expr
     }
 
     fn parse_unary(&mut self) -> Expr {
         if *self.peek() == Token::Bang {
             self.advance();
-
             let operand = self.parse_unary();
-
-            return Expr::Unary {
-                operator: UnaryOp::Not,
-                operand: Box::new(operand),
-            };
+            return Expr::Unary { operator: UnaryOp::Not, operand: Box::new(operand) };
         }
-
         self.parse_factor()
     }
 
@@ -405,17 +347,22 @@ impl Parser {
             Token::StringLiteral(value) => Expr::String(value),
             Token::True => Expr::Bool(true),
             Token::False => Expr::Bool(false),
-            Token::Ident(name) => Expr::Ident(name),
-
+            Token::Ident(name) => {
+                if *self.peek() == Token::LeftParen {
+                    self.advance();
+                    let args = self.parse_call_arguments();
+                    Expr::Call { name, args }
+                } else {
+                    Expr::Ident(name)
+                }
+            }
             Token::LeftParen => {
                 let expr = self.parse_expression();
-
                 match self.advance() {
                     Token::RightParen => expr,
                     _ => panic!("Parser ERR: ')'가 필요합니다."),
                 }
             }
-
             _ => panic!("Parser ERR: 식이 필요합니다."),
         }
     }
@@ -426,12 +373,9 @@ impl Parser {
 
     fn advance(&mut self) -> Token {
         let token = self.tokens[self.position].clone();
-
         if token != Token::EOF {
             self.position += 1;
         }
-
         token
     }
 }
-
