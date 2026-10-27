@@ -94,6 +94,11 @@ pub enum BinaryOp {
     GreaterEqual,
     And,
     Or,
+    ShiftLeft,
+    ShiftRight,
+    BitAnd,
+    BitXor,
+    BitOr,
 }
 
 #[derive(Debug)]

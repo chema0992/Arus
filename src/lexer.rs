@@ -74,7 +74,8 @@ impl Lexer {
                         self.position += 2;
                         Token::AndAnd
                     } else {
-                        panic!("Lexer ERR: 단독 '&'는 지원하지 않습니다.");
+                        self.position += 1;
+                        Token::Ampersand
                     }
                 }
 
@@ -83,12 +84,21 @@ impl Lexer {
                         self.position += 2;
                         Token::OrOr
                     } else {
-                        panic!("Lexer ERR: 단독 '|'는 지원하지 않습니다.");
+                        self.position += 1;
+                        Token::Pipe
                     }
                 }
 
+                '^' => {
+                    self.position += 1;
+                    Token::Caret
+                }
+
                 '<' => {
-                    if self.input.get(self.position + 1) == Some(&'=') {
+                    if self.input.get(self.position + 1) == Some(&'<') {
+                        self.position += 2;
+                        Token::ShiftLeft
+                    } else if self.input.get(self.position + 1) == Some(&'=') {
                         self.position += 2;
                         Token::LessEqual
                     } else {
@@ -98,7 +108,10 @@ impl Lexer {
                 }
 
                 '>' => {
-                    if self.input.get(self.position + 1) == Some(&'=') {
+                    if self.input.get(self.position + 1) == Some(&'>') {
+                        self.position += 2;
+                        Token::ShiftRight
+                    } else if self.input.get(self.position + 1) == Some(&'=') {
                         self.position += 2;
                         Token::GreaterEqual
                     } else {

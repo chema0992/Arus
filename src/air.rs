@@ -93,6 +93,11 @@ pub enum AirBinaryOp {
     Greater,
     LessEqual,
     GreaterEqual,
+    ShiftLeft,
+    ShiftRight,
+    BitAnd,
+    BitXor,
+    BitOr,
 }
 
 #[derive(Debug, Clone)]
@@ -462,6 +467,11 @@ impl AirGenerator {
                     BinaryOp::Greater => AirBinaryOp::Greater,
                     BinaryOp::LessEqual => AirBinaryOp::LessEqual,
                     BinaryOp::GreaterEqual => AirBinaryOp::GreaterEqual,
+                    BinaryOp::ShiftLeft => AirBinaryOp::ShiftLeft,
+                    BinaryOp::ShiftRight => AirBinaryOp::ShiftRight,
+                    BinaryOp::BitAnd => AirBinaryOp::BitAnd,
+                    BinaryOp::BitXor => AirBinaryOp::BitXor,
+                    BinaryOp::BitOr => AirBinaryOp::BitOr,
                     BinaryOp::And | BinaryOp::Or => {
                         unreachable!(
                             "논리 연산은 generate_logical_expr에서 처리해야 합니다."
@@ -723,6 +733,11 @@ impl AirPrinter {
             AirBinaryOp::Greater => "gt",
             AirBinaryOp::LessEqual => "le",
             AirBinaryOp::GreaterEqual => "ge",
+            AirBinaryOp::ShiftLeft => "shl",
+            AirBinaryOp::ShiftRight => "ashr",
+            AirBinaryOp::BitAnd => "and",
+            AirBinaryOp::BitXor => "xor",
+            AirBinaryOp::BitOr => "or",
         }
     }
 
@@ -878,7 +893,7 @@ impl AirTypeChecker {
                     let right_type = Self::value_type(right, variables, temporaries)?;
 
                     let result_type = match operator {
-                        AirBinaryOp::Add | AirBinaryOp::Sub | AirBinaryOp::Mul | AirBinaryOp::Div => {
+                        AirBinaryOp::Add | AirBinaryOp::Sub | AirBinaryOp::Mul | AirBinaryOp::Div | AirBinaryOp::ShiftLeft | AirBinaryOp::ShiftRight | AirBinaryOp::BitAnd | AirBinaryOp::BitXor | AirBinaryOp::BitOr=> {
                             if left_type != AirType::I32 || right_type != AirType::I32 {
                                 return Err(format!(
                                     "AIR Type ERR: {:?} 연산은 i32가 필요합니다. 왼쪽: {:?}, 오른쪽: {:?}",
@@ -911,6 +926,7 @@ impl AirTypeChecker {
                                 )),
                             }
                         }
+                        
                     };
                     temporaries.insert(*destination, result_type);
                 }

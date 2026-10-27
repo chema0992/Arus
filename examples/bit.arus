@@ -1,0 +1,11 @@
+main
+
+fn main() {
+    let a: i32 = 1 + 2 << 3
+    let b: i32 = 12 & 10 ^ 3 | 1
+
+    println(a)
+    println(b)
+
+    return 0
+}

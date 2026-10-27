@@ -156,7 +156,12 @@ impl LlvmGenerator {
                     AirBinaryOp::Add
                     | AirBinaryOp::Sub
                     | AirBinaryOp::Mul
-                    | AirBinaryOp::Div => {
+                    | AirBinaryOp::Div
+                    | AirBinaryOp::ShiftLeft
+                    | AirBinaryOp::ShiftRight
+                    | AirBinaryOp::BitAnd
+                    | AirBinaryOp::BitXor
+                    | AirBinaryOp::BitOr => {
                         if left.ty != AirType::I32
                             || right.ty != AirType::I32
                         {
@@ -170,6 +175,11 @@ impl LlvmGenerator {
                             AirBinaryOp::Sub => "sub",
                             AirBinaryOp::Mul => "mul",
                             AirBinaryOp::Div => "sdiv",
+                            AirBinaryOp::ShiftLeft => "shl",
+                            AirBinaryOp::ShiftRight => "ashr",
+                            AirBinaryOp::BitAnd => "and",
+                            AirBinaryOp::BitXor => "xor",
+                            AirBinaryOp::BitOr => "or",
                             _ => unreachable!(),
                         };
 

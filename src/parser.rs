@@ -245,11 +245,11 @@ impl Parser {
     }
 
     fn parse_logical_or(&mut self) -> Expr {
-        let mut expr = self.parse_logical_and();
+        let mut expr = self.parse_bit_or();
         loop {
             if *self.peek() != Token::OrOr { break; }
             self.advance();
-            let right = self.parse_logical_and();
+            let right = self.parse_bit_or();
             expr = Expr::Binary {
                 left: Box::new(expr), operator: BinaryOp::Or, right: Box::new(right),
             };
@@ -270,6 +270,57 @@ impl Parser {
         expr
     }
 
+    fn parse_bit_or(&mut self) -> Expr {
+        let mut expr = self.parse_bit_xor();
+
+        while *self.peek() == Token::Pipe {
+            self.advance();
+            let right = self.parse_bit_xor();
+
+            expr = Expr::Binary {
+                left: Box::new(expr),
+                operator: BinaryOp::BitOr,
+                right: Box::new(right),
+            };
+        }
+
+        expr
+    }
+
+    fn parse_bit_xor(&mut self) -> Expr {
+        let mut expr = self.parse_bit_and();
+
+        while *self.peek() == Token::Caret {
+            self.advance();
+            let right = self.parse_bit_and();
+
+            expr = Expr::Binary {
+                left: Box::new(expr),
+                operator: BinaryOp::BitXor,
+                right: Box::new(right),
+            };
+        }
+
+        expr
+    }
+
+    fn parse_bit_and(&mut self) -> Expr {
+        let mut expr = self.parse_equality();
+
+        while *self.peek() == Token::Ampersand {
+            self.advance();
+            let right = self.parse_equality();
+
+            expr = Expr::Binary {
+                left: Box::new(expr),
+                operator: BinaryOp::BitAnd,
+                right: Box::new(right),
+            };
+        }
+
+        expr
+    }
+
     fn parse_equality(&mut self) -> Expr {
         let mut expr = self.parse_comparison();
         loop {
@@ -286,7 +337,7 @@ impl Parser {
     }
 
     fn parse_comparison(&mut self) -> Expr {
-        let mut expr = self.parse_additive();
+        let mut expr = self.parse_shift();
         loop {
             let operator = match self.peek() {
                 Token::Less => BinaryOp::Less,
@@ -296,9 +347,32 @@ impl Parser {
                 _ => break,
             };
             self.advance();
-            let right = self.parse_additive();
+            let right = self.parse_shift();
             expr = Expr::Binary { left: Box::new(expr), operator, right: Box::new(right) };
         }
+        expr
+    }
+
+    fn parse_shift(&mut self) -> Expr {
+        let mut expr = self.parse_additive();
+
+        loop {
+            let operator = match self.peek() {
+                Token::ShiftLeft => BinaryOp::ShiftLeft,
+                Token::ShiftRight => BinaryOp::ShiftRight,
+                _ => break,
+            };
+
+            self.advance();
+            let right = self.parse_additive();
+
+            expr = Expr::Binary {
+                left: Box::new(expr),
+                operator,
+                right: Box::new(right),
+            };
+        }
+
         expr
     }
 
