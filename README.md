@@ -2,7 +2,7 @@
 
 <img width="1280" height="640" alt="logo2" src="https://github.com/user-attachments/assets/6cfaa956-3daf-484c-80a3-35a3a3223af1" />
 
-> **Easy to write. Powerful performance.**
+> **Simple to write. Powerful performance.**
 
 Arus is a systems programming language currently under design, aiming for readable and writable syntax while delivering native-code performance. Its core design elements are a proprietary intermediate representation called **AIR (Arus Intermediate Representation)** and a permission-based pointer model.
 
