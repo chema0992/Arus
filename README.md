@@ -2,6 +2,10 @@
 
 <img width="1280" height="640" alt="logo2" src="https://github.com/user-attachments/assets/6cfaa956-3daf-484c-80a3-35a3a3223af1" />
 
+![Rust](https://shields.io/badge/Rust-000000?style=for-the-badge&logo=rust&logoColor=white)
+![Apache](https://shields.io/badge/License-Apache_2.0-green.svg?style=for-the-badge)
+![WIP](https://shields.io/badge/Status-WIP-yellow?style=for-the-badge&logo=git)
+
 > **작성은 쉽게, 성능은 강력하게.**
 
 [Arus](https://arus-lang.pages.dev)는 읽고 쓰기 쉬운 문법과 네이티브 코드 성능을 목표로 하는 시스템 프로그래밍 언어입니다.
