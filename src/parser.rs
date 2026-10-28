@@ -7,6 +7,19 @@ pub struct Parser {
 }
 
 impl Parser {
+    fn parse_assignment(&mut self) -> Stmt {
+        let name = match self.peek() {
+            Token::Ident(name) => name.clone(),
+            _ => unreachable!(),
+        };
+
+        self.advance(); // 변수 이름
+        self.advance(); // =
+
+        let value = self.parse_expression();
+
+        Stmt::Assign { name, value }
+    }
     pub fn new(tokens: Vec<Token>) -> Self {
         Self { tokens, position: 0 }
     }
@@ -19,8 +32,32 @@ impl Parser {
         };
 
         let mut functions = Vec::new();
-        while *self.peek() != Token::EOF {
-            functions.push(self.parse_function());
+        if mode == ProgramMode::Main {
+            while *self.peek() != Token::EOF {
+                functions.push(self.parse_function());
+            }
+        } else {
+            // script 모드에서는 함수 선언 외의 최상위 문장을 순서대로 실행한다.
+            // 기존 AST/LLVM 파이프라인을 재사용하도록 최상위 문장을 합성 main에 담는다.
+            let mut script_body = Vec::new();
+            while *self.peek() != Token::EOF {
+                if *self.peek() == Token::Fn {
+                    let function = self.parse_function();
+                    if function.name == "main" {
+                        panic!("Parser ERR: script 모드에서는 fn main()을 직접 선언하지 마세요. 최상위 문장이 자동으로 main에 들어갑니다.");
+                    }
+                    functions.push(function);
+                } else {
+                    script_body.push(self.parse_statement());
+                }
+            }
+
+            functions.push(Function {
+                name: "main".to_string(),
+                params: Vec::new(),
+                return_type: Some(Type::I32),
+                body: script_body,
+            });
         }
 
         Program { mode, functions }
@@ -107,11 +144,18 @@ impl Parser {
     }
 
     fn parse_statement(&mut self) -> Stmt {
+        if matches!(self.peek(), Token::Ident(_))
+            && self.tokens.get(self.position + 1) == Some(&Token::Equal)
+        {
+            return self.parse_assignment();
+        }
         match self.peek() {
-            Token::Let => self.parse_let(),
+            Token::Let => self.parse_let(false),
+            Token::Mut => self.parse_let(true),
             Token::Return => self.parse_return(),
             Token::If => self.parse_if(),
             Token::While => self.parse_while(),
+            Token::For => self.parse_for(),
             Token::Ident(_) => self.parse_call_statement(),
             _ => panic!("Parser ERR: 알 수 없는 문장입니다: {:?}", self.peek()),
         }
@@ -168,6 +212,33 @@ impl Parser {
         Stmt::While { condition, body }
     }
 
+    fn parse_for(&mut self) -> Stmt {
+        match self.advance() {
+            Token::For => {}
+            _ => unreachable!(),
+        }
+
+        let name = match self.advance() {
+            Token::Ident(name) => name,
+            _ => panic!("Parser ERR: for 뒤에 반복 변수 이름이 필요합니다."),
+        };
+
+        match self.advance() {
+            Token::In => {}
+            _ => panic!("Parser ERR: for 변수 뒤에 'in'이 필요합니다."),
+        }
+
+        let start = self.parse_expression();
+        match self.advance() {
+            Token::DotDot => {}
+            _ => panic!("Parser ERR: for 범위는 시작..끝 형식이어야 합니다."),
+        }
+        let end = self.parse_expression();
+        let body = self.parse_block();
+
+        Stmt::For { name, start, end, body }
+    }
+
     fn parse_call_statement(&mut self) -> Stmt {
         let name = match self.advance() {
             Token::Ident(name) => name,
@@ -204,7 +275,7 @@ impl Parser {
         }
     }
 
-    fn parse_let(&mut self) -> Stmt {
+    fn parse_let(&mut self, mutable: bool) -> Stmt {
         self.advance();
         let name = match self.advance() {
             Token::Ident(name) => name,
@@ -221,7 +292,12 @@ impl Parser {
             _ => panic!("Parser ERR: '='가 필요합니다."),
         }
         let value = self.parse_expression();
-        Stmt::Let { name, ty, value }
+        Stmt::Let {
+            name,
+            ty,
+            value,
+            mutable,
+        }
     }
 
     fn parse_return(&mut self) -> Stmt {
@@ -232,7 +308,12 @@ impl Parser {
 
     fn parse_type(&mut self) -> Type {
         match self.advance() {
+            Token::Ident(name) if name == "i8" => Type::I8,
+            Token::Ident(name) if name == "i16" => Type::I16,
             Token::Ident(name) if name == "i32" => Type::I32,
+            Token::Ident(name) if name == "u8" => Type::U8,
+            Token::Ident(name) if name == "u16" => Type::U16,
+            Token::Ident(name) if name == "u32" => Type::U32,
             Token::Ident(name) if name == "str" => Type::Str,
             Token::Ident(name) if name == "bool" => Type::Bool,
             Token::Ident(name) => Type::Named(name),
@@ -245,11 +326,11 @@ impl Parser {
     }
 
     fn parse_logical_or(&mut self) -> Expr {
-        let mut expr = self.parse_bit_or();
+        let mut expr = self.parse_logical_and();
         loop {
             if *self.peek() != Token::OrOr { break; }
             self.advance();
-            let right = self.parse_bit_or();
+            let right = self.parse_logical_and();
             expr = Expr::Binary {
                 left: Box::new(expr), operator: BinaryOp::Or, right: Box::new(right),
             };
@@ -258,11 +339,11 @@ impl Parser {
     }
 
     fn parse_logical_and(&mut self) -> Expr {
-        let mut expr = self.parse_equality();
+        let mut expr = self.parse_bit_or();
         loop {
             if *self.peek() != Token::AndAnd { break; }
             self.advance();
-            let right = self.parse_equality();
+            let right = self.parse_bit_or();
             expr = Expr::Binary {
                 left: Box::new(expr), operator: BinaryOp::And, right: Box::new(right),
             };
@@ -288,11 +369,13 @@ impl Parser {
     }
 
     fn parse_bit_xor(&mut self) -> Expr {
-        let mut expr = self.parse_bit_and();
+        // Equality is intentionally lower precedence than bitwise AND,
+        // so `i & 1 == 0` parses as `(i & 1) == 0`.
+        let mut expr = self.parse_equality();
 
         while *self.peek() == Token::Caret {
             self.advance();
-            let right = self.parse_bit_and();
+            let right = self.parse_equality();
 
             expr = Expr::Binary {
                 left: Box::new(expr),
@@ -305,11 +388,11 @@ impl Parser {
     }
 
     fn parse_bit_and(&mut self) -> Expr {
-        let mut expr = self.parse_equality();
+        let mut expr = self.parse_comparison();
 
         while *self.peek() == Token::Ampersand {
             self.advance();
-            let right = self.parse_equality();
+            let right = self.parse_comparison();
 
             expr = Expr::Binary {
                 left: Box::new(expr),
@@ -322,17 +405,25 @@ impl Parser {
     }
 
     fn parse_equality(&mut self) -> Expr {
-        let mut expr = self.parse_comparison();
+        let mut expr = self.parse_bit_and();
+
         loop {
             let operator = match self.peek() {
                 Token::EqualEqual => BinaryOp::Equal,
                 Token::BangEqual => BinaryOp::NotEqual,
                 _ => break,
             };
+
             self.advance();
-            let right = self.parse_comparison();
-            expr = Expr::Binary { left: Box::new(expr), operator, right: Box::new(right) };
+            let right = self.parse_bit_and();
+
+            expr = Expr::Binary {
+                left: Box::new(expr),
+                operator,
+                right: Box::new(right),
+            };
         }
+
         expr
     }
 

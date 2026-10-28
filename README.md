@@ -2,52 +2,52 @@
 
 <img width="1280" height="640" alt="logo2" src="https://github.com/user-attachments/assets/6cfaa956-3daf-484c-80a3-35a3a3223af1" />
 
-> **작성은 쉽게, 성능은 강력하게.**
+> **Easy to write. Powerful performance.**
 
-Arus는 읽고 쓰기 쉬운 문법과 네이티브 코드 성능을 목표로 설계 중인 시스템 프로그래밍 언어입니다. 독자적인 중간 표현인 **AIR(Arus Intermediate Representation)** 과 권한(permission) 기반 포인터 모델을 핵심 설계 요소로 삼습니다.
+Arus is a systems programming language currently under design, aiming for readable and writable syntax while delivering native-code performance. Its core design elements are a proprietary intermediate representation called **AIR (Arus Intermediate Representation)** and a permission-based pointer model.
 
 > [!WARNING]
-> **Arus는 현재 설계 및 개발 단계입니다.** 아래 문법과 명령 예시는 현재 설계 및 구현 방향을 보여 주기 위한 것이며, 구현 상태와 세부 규칙은 변경될 수 있습니다. 아직 안정적인 1.0 릴리스를 전제로 하지 않습니다.
+> **Arus is currently in the design and development phase.** The syntax and command examples below illustrate the current design direction and intended implementation. Implementation status and detailed rules may change. A stable 1.0 release is not yet assumed.
 
-## 설계 목표
+## Design Goals
 
-- **쉬운 작성:** 불필요한 구문 장식을 줄이고, 읽기 쉬운 코드를 지향합니다.
-- **네이티브 컴파일:** 최종 목표는 LLVM을 이용한 네이티브 머신 코드 생성입니다.
-- **명시적인 메모리 권한:** 포인터의 읽기·쓰기 권한을 타입에 표현하고, 컴파일 단계에서 잘못된 접근을 검사합니다.
-- **독립적인 중간 표현:** AIR를 Frontend와 Backend 사이의 명확한 경계로 둡니다.
-- **점진적인 셀프호스팅:** 초기 컴파일러는 Rust로 개발하고, 언어가 충분히 성숙한 뒤 Arus로 컴파일러를 재작성하는 것을 장기 목표로 합니다.
+- **Easy to write:** Minimize unnecessary syntactic noise and prioritize readable code.
+- **Native compilation:** The ultimate goal is native machine-code generation via LLVM.
+- **Explicit memory permissions:** Express read/write permissions of pointers in the type system and check invalid accesses at compile time.
+- **Independent intermediate representation:** Keep AIR as a clear boundary between the frontend and backend.
+- **Gradual self-hosting:** Bootstrap the initial compiler in Rust, then rewrite the compiler in Arus once the language is sufficiently mature.
 
-## 컴파일 구조
+## Compilation Pipeline
 
 ```text
 Arus Source
-    ↓
+↓
 Lexer / Parser
-    ↓
+↓
 AST
-    ↓
+↓
 AIR
-    │  타입 및 권한 정보
-    │  메모리 접근·별칭 관련 검사
-    ↓
+│ Type and permission information
+│ Memory-access and aliasing checks
+↓
 LLVM IR
-    ↓
+↓
 LLVM Backend
-    ↓
+↓
 Native Machine Code
 ```
 
-각 단계의 역할은 다음과 같습니다.
+Roles of each stage:
 
-- **AST:** 소스 코드의 구문 구조를 표현합니다. 타입과 권한에 관한 정보도 후속 분석 단계에서 보존할 수 있어야 합니다.
-- **AIR:** AST보다 단순하고 명시적인 연산으로 프로그램을 표현합니다. Arus의 타입·메모리 권한 규칙을 분석하고, LLVM IR을 만들기 전에 언어 차원의 검사를 수행합니다.
-- **LLVM IR / Backend:** 검증된 AIR를 LLVM IR로 변환한 뒤, LLVM을 통해 최적화와 네이티브 코드 생성을 수행합니다.
+- **AST:** Represents the syntactic structure of the source code. Type and permission information must be preservable for later analysis stages.
+- **AIR:** Expresses the program with simpler and more explicit operations than the AST. Performs language-level checks of Arus type and memory-permission rules before generating LLVM IR.
+- **LLVM IR / Backend:** Converts verified AIR into LLVM IR, then uses LLVM for optimization and native code generation.
 
-AIR의 목적은 LLVM IR을 복제하는 것이 아닙니다. **Arus의 의미와 권한 정보를 유지하면서도 파싱과 분석이 쉬운 중간 표현**을 제공하는 것입니다.
+The purpose of AIR is not to replicate LLVM IR. It provides an intermediate representation that is easy to parse and analyze while preserving Arus semantics and permission information.
 
-### AIR 문법 방향
+### AIR Syntax Direction
 
-AIR는 파싱 비용과 구현 복잡도를 줄이기 위해, 명령어를 한 줄에 하나씩 적고 피연산자를 공백으로 구분하는 텍스트 형식을 우선 검토하고 있습니다.
+To reduce parsing cost and implementation complexity, AIR currently prioritizes a simple text format in which each instruction appears on its own line and operands are separated by spaces.
 
 ```text
 %1 = add 100 60
@@ -56,31 +56,33 @@ AIR는 파싱 비용과 구현 복잡도를 줄이기 위해, 명령어를 한 �
 return %3
 ```
 
-위 코드는 설계 방향을 보여 주는 예시입니다. 최종 명령어 목록, 타입 표기, 블록·함수 문법 및 AIR 파일 규격은 아직 확정되지 않았습니다.
+The code above is only an illustrative example of the design direction. The final instruction set, type notation, block/function syntax, and AIR file format have not yet been finalized.
 
-## 실행 모드
+## Execution Modes
 
-두 실행 모드를 구상하고 있습니다.
+Two execution modes are planned:
 
-| 모드 | 동작 | 주요 목적 |
-|---|---|---|
-| `runtime` | 인터프리터로 즉시 실행 | 빠른 테스트와 개발 |
-| `compile` | 컴파일 후 네이티브 코드 실행 | 기본 실행 방식 및 배포 |
+```
+| Mode      | Behavior                        | Primary Purpose              |
+| --------- | ------------------------------- | ---------------------------- |
+| `runtime` | Immediate execution via interpreter | Fast testing and development |
+| `compile` | Compile then run native code    | Default execution and deployment |
+```
 
-컴파일 모드를 기본으로 두고, 런타임 모드는 개발 편의를 위한 선택지로 제공하는 것이 목표입니다. 아래 CLI 예시는 목표 인터페이스를 나타내며, 실제 구현 여부를 보장하지 않습니다.
+Compile mode is intended to be the default; runtime mode is provided as a convenience for development. The CLI examples below represent the target interface and do not guarantee current implementation.
 
 ```sh
 arus run test.arus
 arus build main.arus
 ```
 
-## 프로그램 구조
+## Program Structure
 
-Arus 소스는 두 가지 프로그램 형태 중 하나를 명시하는 방향으로 설계하고 있습니다.
+Arus sources are designed to explicitly declare one of two program forms.
 
 ### `script`
 
-파일의 최상위 문장을 순서대로 실행합니다.
+Top-level statements in the file are executed in order.
 
 ```arus
 script
@@ -92,23 +94,23 @@ println(value)
 
 ### `main`
 
-명시적인 진입 함수 `main()`을 사용하는 프로그램입니다.
+Programs that use an explicit entry-point function `main()`.
 
 ```arus
 main
 
 fn main() {
-    println("Hello, Arus!")
+println("Hello, Arus!")
 }
 ```
 
-`script`와 `main`은 서로 다른 프로그램 구조를 나타냅니다. 세부적인 유효성 규칙은 개발 과정에서 확정할 예정입니다.
+`script` and `main` represent distinct program structures. Detailed validity rules will be finalized during development.
 
-## 문법 미리보기
+## Syntax Preview
 
-다음 예시는 현재의 문법 설계 방향을 요약합니다.
+The following examples summarize the current direction of the language syntax.
 
-### 변수와 타입
+### Variables and Types
 
 ```arus
 let count: i32 = 10
@@ -118,48 +120,48 @@ let inferred = 30
 mut updated = 40
 ```
 
-- `let`은 불변 바인딩, `mut`은 가변 바인딩을 나타냅니다.
-- 타입을 생략하면 타입 추론을 사용합니다.
-- 세미콜론은 기본 문법에서 필수로 두지 않습니다.
+- `let` denotes an immutable binding; `mut` denotes a mutable binding.
+- Omitting the type enables type inference.
+- Semicolons are not required in the base syntax.
 
-### 함수와 반환
+### Functions and Return
 
 ```arus
 fn add(a: i32, b: i32) -> i32 {
-    return a + b
+return a + b
 }
 ```
 
-반환은 `return`으로 명시합니다. 마지막 표현식의 값을 자동으로 반환하는 방식은 사용하지 않는 방향입니다.
+Returns are explicit via `return`. Implicit return of the last expression is not planned.
 
-### 조건문과 반복문
+### Conditionals and Loops
 
 ```arus
 if count > 10 {
-    println("large")
+println("large")
 } else if count > 5 {
-    println("medium")
+println("medium")
 } else {
-    println("small")
+println("small")
 }
 
 for i in 0..10 {
-    println(i)
+println(i)
 }
 ```
 
-조건식에 괄호를 필수로 요구하지 않으며, 조건은 불리언 값이어야 합니다. 범위의 끝값 포함 여부 등 세부 규칙은 별도 확정 대상입니다.
+Parentheses around conditions are not required; the condition must evaluate to a boolean. Details such as whether range endpoints are inclusive remain to be finalized.
 
-### 문자열과 보간
+### Strings and Interpolation
 
 ```arus
 print("value = {count}")
 print(f"value = {count}")
 ```
 
-일반 문자열에서 `{count}`는 문자 그대로 취급하고, `f"..."` 문자열에서만 값을 보간하는 방향입니다.
+In ordinary strings `{count}` is treated literally; interpolation occurs only inside `f"..."` strings.
 
-### 배열
+### Arrays
 
 ```arus
 let fixed: [i32; 3] = [10, 20, 30]
@@ -169,53 +171,55 @@ values.push(4)
 println(values[0])
 ```
 
-`[T; N]`은 크기가 고정된 배열, `[T]`는 동적 배열을 표현하는 방향입니다. 배열의 전체 동작 및 타입 추론 규칙은 아직 설계 대상입니다.
+`[T; N]` denotes a fixed-size array; `[T]` denotes a dynamic array. Full array behavior and type-inference rules are still under design.
 
-### 구조체와 열거형
+### Structs and Enums
 
 ```arus
 struct User {
-    name: str
-    age: i32
+name: str
+age: i32
 }
 
 let user = User {
-    name: "Tom"
-    age: 20
+name: "Tom"
+age: 20
 }
 
 enum Color {
-    Red
-    Green
-    Blue
+Red
+Green
+Blue
 }
 ```
 
-현재는 상속 중심의 `class`보다 `struct`를, 별도의 클래스형 enum보다 일반 enum을 우선 검토하고 있습니다.
+Preference is currently given to `struct` over inheritance-oriented `class`, and to ordinary enums over class-style enums.
 
 ### `match`
 
 ```arus
 match color {
-    Red => println("red")
-    Green => println("green")
-    Blue => println("blue")
+Red => println("red")
+Green => println("green")
+Blue => println("blue")
 }
 ```
 
-분기 패턴과 화살표 `=>`를 사용하는 문법을 검토하고 있습니다. 패턴 완전성 검사와 반환값 규칙은 미확정입니다.
+A syntax using branch patterns and the arrow `=>` is under consideration. Exhaustiveness checking and return-value rules are not yet decided.
 
-## 권한 기반 포인터
+## Permission-Based Pointers
 
-Arus의 핵심 설계 중 하나는 포인터 타입에 읽기·쓰기 권한을 명시하는 것입니다.
+One of Arus’s core design decisions is to make read/write permissions explicit in pointer types.
 
-| 표기 | 의미 |
-|---|---|
-| `T r*` | 읽기 권한 |
-| `T w*` | 쓰기 권한 |
-| `T rw*` | 읽기 및 쓰기 권한 |
+```
+| Notation | Meaning              |
+| -------- | -------------------- |
+| `T r*`   | Read permission      |
+| `T w*`   | Write permission     |
+| `T rw*`  | Read and write permission |
+```
 
-예를 들어 다음 코드는 읽기 전용 포인터를 사용합니다.
+Example of a read-only pointer:
 
 ```arus
 let value: i32 = 5
@@ -225,17 +229,17 @@ let copy = *pointer
 println(copy)
 ```
 
-`r*` 포인터를 통한 쓰기는 허용하지 않는 방향입니다.
+Writes through an `r*` pointer are disallowed:
 
 ```arus
-*pointer = 10 // 컴파일 오류: 읽기 전용 포인터로 쓰기 시도
+*pointer = 10 // compile error: write through read-only pointer
 ```
 
-`let` 또는 `mut` 바인딩의 가변성은 포인터 권한과 별개로 다룹니다. 포인터 추론의 기본값은 읽기 권한(`r`)으로 두는 방향입니다. 포인터 생성 조건, 별칭 제한, 수명 및 메모리 해제 규칙은 더 구체적인 설계가 필요합니다.
+Mutability of a `let` or `mut` binding is independent of pointer permissions. The default inferred permission for pointers is currently planned to be read (`r`). Pointer creation conditions, aliasing restrictions, lifetimes, and deallocation rules require further detailed design.
 
-## 표준 입출력
+## Standard Input / Output
 
-표준 입출력은 Rust와 Python의 방식처럼, 별도의 선언 없이 내장으로 가져오는 방향입니다.
+Standard I/O is intended to be available as built-ins without explicit imports, similar to Rust and Python.
 
 ```arus
 
@@ -246,24 +250,25 @@ let text = input("Input: ")
 let number = i32(input("Number: "))
 ```
 
-- `print()`는 줄바꿈하지 않습니다.
-- `println()`은 출력 후 줄바꿈합니다.
-- `input()`은 `str`을 반환합니다.
-- `i32(value)` 같은 타입 이름 기반 변환 문법을 지향합니다. 변환 실패의 구체적인 처리 방식은 미정입니다.
+- `print()` does not append a newline.
+- `println()` appends a newline after output.
+- `input()` returns a `str`.
+- Type-name conversion syntax such as `i32(value)` is preferred. Concrete handling of conversion failures is still undecided.
 
-## 개발 방향
+## Development Roadmap
 
-1. Arus의 기본 문법과 타입 규칙 정리
-2. AST 및 AIR 데이터 구조와 텍스트 규격 설계
-3. AIR의 타입·권한·메모리 분석기 구현
-4. AIR에서 LLVM IR로의 변환과 네이티브 코드 생성
-5. 런타임 인터프리터 및 개발 도구 구축
-6. 언어가 안정화된 이후 셀프호스팅 추진
+1. Finalize basic syntax and type rules of Arus
+2. Design AST and AIR data structures together with the text format
+3. Implement AIR type, permission, and memory analyzers
+4. Convert AIR to LLVM IR and generate native code
+5. Build a runtime interpreter and developer tooling
+6. Pursue self-hosting once the language stabilizes
 
-## 프로젝트 상태
+## Project Status
 
-Arus는 아직 실험적인 설계 단계입니다. 현재 문서에 등장하는 문법과 명령은 최종 사양이나 완성된 기능 목록이 아닙니다. 구현이 진행되면서 예제, 빌드 방법, 테스트 방법 및 기여 안내를 추가할 예정입니다.
+Arus is still in an experimental design phase. The syntax and commands appearing in this document are not a final specification or a complete feature list. As implementation progresses, examples, build instructions, testing methods, and contribution guidelines will be added.
 
-## 라이선스
+## License
 
-LICENSE 문서를 참고하세요.
+See the LICENSE document.
+```

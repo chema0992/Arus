@@ -4,7 +4,7 @@ pub struct Program {
     pub functions: Vec<Function>,
 }
 
-#[derive(Debug)]
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub enum ProgramMode {
     Main,
     Script,
@@ -26,25 +26,13 @@ pub struct Parameter {
 
 #[derive(Debug)]
 pub enum Stmt {
-    Let {
-        name: String,
-        ty: Option<Type>,
-        value: Expr,
-    },
+    Let { name: String, ty: Option<Type>, value: Expr, mutable: bool },
     Return(Expr),
-    Call {
-        name: String,
-        args: Vec<Expr>,
-    },
-    If {
-        condition: Expr,
-        then_body: Vec<Stmt>,
-        else_body: Option<ElseBody>,
-    },
-    While {
-        condition: Expr,
-        body: Vec<Stmt>,
-    },
+    Call { name: String, args: Vec<Expr> },
+    If { condition: Expr, then_body: Vec<Stmt>, else_body: Option<ElseBody> },
+    While { condition: Expr, body: Vec<Stmt> },
+    For { name: String, start: Expr, end: Expr, body: Vec<Stmt> },
+    Assign { name: String, value: Expr },
 }
 
 #[derive(Debug)]
@@ -53,24 +41,11 @@ pub enum Expr {
     String(String),
     Bool(bool),
     Ident(String),
-    Call {
-        name: String,
-        args: Vec<Expr>,
-    },
-    // Reserved AST shape for future f"...{expression}..." support.
+    Call { name: String, args: Vec<Expr> },
     #[allow(dead_code)]
-    InterpolatedString {
-        parts: Vec<StringPart>,
-    },
-    Binary {
-        left: Box<Expr>,
-        operator: BinaryOp,
-        right: Box<Expr>,
-    },
-    Unary {
-        operator: UnaryOp,
-        operand: Box<Expr>,
-    },
+    InterpolatedString { parts: Vec<StringPart> },
+    Binary { left: Box<Expr>, operator: BinaryOp, right: Box<Expr> },
+    Unary { operator: UnaryOp, operand: Box<Expr> },
 }
 
 #[allow(dead_code)]
@@ -80,48 +55,26 @@ pub enum StringPart {
     Expr(Box<Expr>),
 }
 
-#[derive(Debug)]
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub enum BinaryOp {
-    Add,
-    Sub,
-    Mul,
-    Div,
-    Equal,
-    NotEqual,
-    Less,
-    Greater,
-    LessEqual,
-    GreaterEqual,
-    And,
-    Or,
-    ShiftLeft,
-    ShiftRight,
-    BitAnd,
-    BitXor,
-    BitOr,
+    Add, Sub, Mul, Div,
+    Equal, NotEqual, Less, Greater, LessEqual, GreaterEqual,
+    And, Or,
+    ShiftLeft, ShiftRight, BitAnd, BitXor, BitOr,
 }
 
-#[derive(Debug)]
-pub enum UnaryOp {
-    Not,
-}
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum UnaryOp { Not }
 
-#[derive(Debug, Clone, PartialEq)]
+#[derive(Debug, Clone, PartialEq, Eq)]
 pub enum Type {
-    I32,
-    Str,
-    Bool,
+    I8, I16, I32, U8, U16, U32,
+    Str, Bool,
     Named(String),
 }
 
 #[derive(Debug)]
 pub enum ElseBody {
-    ElseIf {
-        condition: Expr,
-        body: Vec<Stmt>,
-        next: Option<Box<ElseBody>>,
-    },
-    Else {
-        body: Vec<Stmt>,
-    },
+    ElseIf { condition: Expr, body: Vec<Stmt>, next: Option<Box<ElseBody>> },
+    Else { body: Vec<Stmt> },
 }

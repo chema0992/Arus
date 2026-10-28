@@ -27,6 +27,18 @@ impl Lexer {
             let ch = self.input[self.position];
 
             let token = match ch {
+                ';' => {
+                    self.position += 1;
+                    continue;
+                }
+                '.' => {
+                    if self.input.get(self.position + 1) == Some(&'.') {
+                        self.position += 2;
+                        Token::DotDot
+                    } else {
+                        panic!("Lexer ERR: 범위 연산자는 '..'로 작성해야 합니다.")
+                    }
+                }
                 '+' => {
                     self.position += 1;
                     Token::Plus
@@ -45,6 +57,20 @@ impl Lexer {
                     Token::Star
                 }
                 '/' => {
+                    if self.position + 1 < self.input.len()
+                        && self.input[self.position + 1] == '/'
+                    {
+                        self.position += 2;
+
+                        while self.position < self.input.len()
+                            && self.input[self.position] != '\n'
+                        {
+                            self.position += 1;
+                        }
+
+                        continue;
+                    }
+
                     self.position += 1;
                     Token::Slash
                 }
@@ -196,6 +222,9 @@ impl Lexer {
             "script" => Token::Script,
             "fn" => Token::Fn,
             "let" => Token::Let,
+            "mut" => Token::Mut,
+            "for" => Token::For,
+            "in" => Token::In,
             "return" => Token::Return,
             "if" => Token::If,
             "else" => Token::Else,

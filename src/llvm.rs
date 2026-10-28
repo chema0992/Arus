@@ -12,16 +12,24 @@ pub struct LlvmGenerator {
     globals: String,
     output: String,
     variables: HashMap<String, GeneratedValue>,
+    active_mutable_slots: HashMap<String, String>,
+    mutable_types: HashMap<String, AirType>,
+    slot_by_instruction: HashMap<usize, String>,
     string_pool: HashMap<String, String>,
     temporary_types: HashMap<u32, AirType>,
     next_string: u32,
+    next_slot: u32,
+    next_load: u32,
+    next_promoted: u32,
     next_call: u32,
+    next_for: u32,
     next_if: u32,
     next_while: u32,
     next_logical: u32,
     current_block: String,
     next_bool_string: u32,
     function_signatures: HashMap<String, (Vec<AirType>, AirType)>,
+    current_return_type: AirType,
     current_terminated: bool,
 }
 
@@ -31,6 +39,8 @@ impl LlvmGenerator {
             globals: String::from(concat!(
                 "@.fmt.print.i32 = private unnamed_addr constant [3 x i8] c\"%d\\00\", align 1\n",
                 "@.fmt.println.i32 = private unnamed_addr constant [4 x i8] c\"%d\\0A\\00\", align 1\n",
+                "@.fmt.print.u32 = private unnamed_addr constant [3 x i8] c\"%u\\00\", align 1\n",
+                "@.fmt.println.u32 = private unnamed_addr constant [4 x i8] c\"%u\\0A\\00\", align 1\n",
                 "@.fmt.print.str = private unnamed_addr constant [3 x i8] c\"%s\\00\", align 1\n",
                 "@.fmt.println.str = private unnamed_addr constant [4 x i8] c\"%s\\0A\\00\", align 1\n",
                 "@.fmt.print.bool = private unnamed_addr constant [3 x i8] c\"%s\\00\", align 1\n",
@@ -43,16 +53,24 @@ impl LlvmGenerator {
             )),
             output: String::new(),
             variables: HashMap::new(),
+            active_mutable_slots: HashMap::new(),
+            mutable_types: HashMap::new(),
+            slot_by_instruction: HashMap::new(),
             string_pool: HashMap::new(),
             temporary_types: HashMap::new(),
             next_string: 0,
+            next_slot: 0,
+            next_load: 0,
+            next_promoted: 0,
             next_call: 1,
+            next_for: 1,
             next_if: 1,
             next_while: 1,
             next_logical: 1,
             current_block: String::new(),
             next_bool_string: 1,
             function_signatures: HashMap::new(),
+            current_return_type: AirType::Void,
             current_terminated: false,
         }
     }
@@ -76,15 +94,81 @@ impl LlvmGenerator {
         format!("{}{}", generator.globals, generator.output)
     }
 
+    fn collect_mutable_slots(
+        instructions: &[AirInstruction],
+        slot_by_instruction: &mut HashMap<usize, String>,
+        allocas: &mut Vec<String>,
+        next_slot: &mut u32,
+    ) {
+        for instruction in instructions {
+            let needs_slot = matches!(instruction, AirInstruction::For { .. })
+                || matches!(instruction, AirInstruction::Let { mutable: true, .. });
+            if needs_slot {
+                let key = instruction as *const AirInstruction as usize;
+                let slot = format!("%slot{}", *next_slot);
+                *next_slot += 1;
+                slot_by_instruction.insert(key, slot.clone());
+                // A generously sized slot keeps all supported scalar values aligned and
+                // lets the opaque `ptr` be loaded/stored using the value's actual type.
+                allocas.push(format!("    {slot} = alloca i64, align 8\n"));
+            }
+
+            match instruction {
+                AirInstruction::If { then_body, else_body, .. } => {
+                    Self::collect_mutable_slots(then_body, slot_by_instruction, allocas, next_slot);
+                    if let Some(else_body) = else_body {
+                        Self::collect_mutable_slots(else_body, slot_by_instruction, allocas, next_slot);
+                    }
+                }
+                AirInstruction::While { condition_instructions, body, .. } => {
+                    Self::collect_mutable_slots(condition_instructions, slot_by_instruction, allocas, next_slot);
+                    Self::collect_mutable_slots(body, slot_by_instruction, allocas, next_slot);
+                }
+                AirInstruction::For { body, .. } => {
+                    Self::collect_mutable_slots(body, slot_by_instruction, allocas, next_slot);
+                }
+                AirInstruction::Logical { left_instructions, right_instructions, .. } => {
+                    Self::collect_mutable_slots(left_instructions, slot_by_instruction, allocas, next_slot);
+                    Self::collect_mutable_slots(right_instructions, slot_by_instruction, allocas, next_slot);
+                }
+                _ => {}
+            }
+        }
+    }
+
+    fn is_integer_type(ty: &AirType) -> bool {
+        matches!(ty, AirType::I8 | AirType::I16 | AirType::I32 | AirType::U8 | AirType::U16 | AirType::U32)
+    }
+
+    fn is_signed_integer_type(ty: &AirType) -> bool {
+        matches!(ty, AirType::I8 | AirType::I16 | AirType::I32)
+    }
+
     fn generate_function(&mut self, function: &AirFunction) {
         self.variables.clear();
+        self.active_mutable_slots.clear();
+        self.mutable_types.clear();
+        self.slot_by_instruction.clear();
         self.temporary_types.clear();
+        self.next_slot = 0;
+        self.next_load = 0;
+        self.next_promoted = 0;
         self.next_call = 1;
         self.next_if = 1;
         self.next_while = 1;
+        self.next_for = 1;
         self.next_logical = 1;
         self.next_bool_string = 1;
         self.current_terminated = false;
+        self.current_return_type = function.return_type.clone();
+
+        let mut allocas = Vec::new();
+        Self::collect_mutable_slots(
+            &function.instructions,
+            &mut self.slot_by_instruction,
+            &mut allocas,
+            &mut self.next_slot,
+        );
 
         let params = function.params.iter()
             .enumerate()
@@ -100,6 +184,9 @@ impl LlvmGenerator {
 
         self.output.push_str("entry:\n");
         self.current_block = "entry".to_string();
+        for alloca in allocas {
+            self.output.push_str(&alloca);
+        }
 
         for (index, param) in function.params.iter().enumerate() {
             self.variables.insert(param.name.clone(), GeneratedValue {
@@ -112,7 +199,12 @@ impl LlvmGenerator {
 
         if !self.current_terminated {
             let (llvm_type, default_value) = match &function.return_type {
+                AirType::I8 => ("i8", "0"),
+                AirType::I16 => ("i16", "0"),
                 AirType::I32 => ("i32", "0"),
+                AirType::U8 => ("i8", "0"),
+                AirType::U16 => ("i16", "0"),
+                AirType::U32 => ("i32", "0"),
                 AirType::Bool => ("i1", "false"),
                 AirType::Str => ("ptr", "null"),
                 AirType::Void => ("void", ""),
@@ -141,138 +233,81 @@ impl LlvmGenerator {
 
     fn generate_instruction(&mut self, instruction: &AirInstruction) {
         match instruction {
-            AirInstruction::Binary {
-                destination,
-                operator,
-                left,
-                right,
-            } => {
-                let left = self.value(left);
-                let right = self.value(right);
+            AirInstruction::Binary { destination, operator, left, right } => {
+                let mut left_value = self.value(left);
+                let mut right_value = self.value(right);
 
-                let result_type;
+                // 정수 리터럴은 반대편 피연산자의 정수 타입을 따른다.
+                if matches!(left, AirValue::Integer(_)) && Self::is_integer_type(&right_value.ty) {
+                    left_value.ty = right_value.ty.clone();
+                } else if matches!(right, AirValue::Integer(_)) && Self::is_integer_type(&left_value.ty) {
+                    right_value.ty = left_value.ty.clone();
+                }
 
-                match operator {
-                    AirBinaryOp::Add
-                    | AirBinaryOp::Sub
-                    | AirBinaryOp::Mul
-                    | AirBinaryOp::Div
-                    | AirBinaryOp::ShiftLeft
-                    | AirBinaryOp::ShiftRight
-                    | AirBinaryOp::BitAnd
-                    | AirBinaryOp::BitXor
-                    | AirBinaryOp::BitOr => {
-                        if left.ty != AirType::I32
-                            || right.ty != AirType::I32
-                        {
-                            panic!(
-                                "LLVM ERR: 산술 연산에는 i32 값이 필요합니다."
-                            );
+                let result_type = match operator {
+                    AirBinaryOp::Add | AirBinaryOp::Sub | AirBinaryOp::Mul | AirBinaryOp::Div
+                    | AirBinaryOp::ShiftLeft | AirBinaryOp::ShiftRight | AirBinaryOp::BitAnd
+                    | AirBinaryOp::BitXor | AirBinaryOp::BitOr => {
+                        if !Self::is_integer_type(&left_value.ty) || left_value.ty != right_value.ty {
+                            panic!("LLVM ERR: 산술/비트 연산에는 같은 정수 타입이 필요합니다.");
                         }
-
+                        let llvm_type = Self::llvm_type(&left_value.ty);
                         let op = match operator {
                             AirBinaryOp::Add => "add",
                             AirBinaryOp::Sub => "sub",
                             AirBinaryOp::Mul => "mul",
-                            AirBinaryOp::Div => "sdiv",
+                            AirBinaryOp::Div => if Self::is_signed_integer_type(&left_value.ty) { "sdiv" } else { "udiv" },
                             AirBinaryOp::ShiftLeft => "shl",
-                            AirBinaryOp::ShiftRight => "ashr",
+                            AirBinaryOp::ShiftRight => if Self::is_signed_integer_type(&left_value.ty) { "ashr" } else { "lshr" },
                             AirBinaryOp::BitAnd => "and",
                             AirBinaryOp::BitXor => "xor",
                             AirBinaryOp::BitOr => "or",
                             _ => unreachable!(),
                         };
-
                         self.output.push_str(&format!(
-                            "    %t{} = {} i32 {}, {}\n",
-                            destination,
-                            op,
-                            left.operand,
-                            right.operand
+                            "    %t{} = {} {} {}, {}\n",
+                            destination, op, llvm_type, left_value.operand, right_value.operand
                         ));
-
-                        result_type = AirType::I32;
+                        left_value.ty.clone()
                     }
 
-                    AirBinaryOp::Equal
-                    | AirBinaryOp::NotEqual
-                    | AirBinaryOp::Less
-                    | AirBinaryOp::Greater
-                    | AirBinaryOp::LessEqual
-                    | AirBinaryOp::GreaterEqual => {
-                        let (predicate, llvm_type) = match operator {
-                            AirBinaryOp::Equal | AirBinaryOp::NotEqual => {
-                                if left.ty != right.ty {
-                                    panic!(
-                                        "LLVM ERR: 비교 연산의 양쪽 타입이 다릅니다."
-                                    );
-                                }
-
-                                if !matches!(
-                                    &left.ty,
-                                    AirType::I32 | AirType::Bool
-                                ) {
-                                    panic!(
-                                        "LLVM ERR: 현재 ==와 !=는 i32와 bool만 지원합니다."
-                                    );
-                                }
-
-                                let predicate = match operator {
-                                    AirBinaryOp::Equal => "eq",
-                                    AirBinaryOp::NotEqual => "ne",
-                                    _ => unreachable!(),
-                                };
-
-                                (predicate, Self::llvm_type(&left.ty))
-                            }
-
+                    AirBinaryOp::Equal | AirBinaryOp::NotEqual
+                    | AirBinaryOp::Less | AirBinaryOp::Greater
+                    | AirBinaryOp::LessEqual | AirBinaryOp::GreaterEqual => {
+                        if left_value.ty != right_value.ty {
+                            panic!("LLVM ERR: 비교 연산의 양쪽 타입이 다릅니다.");
+                        }
+                        let predicate = match operator {
+                            AirBinaryOp::Equal => "eq",
+                            AirBinaryOp::NotEqual => "ne",
                             AirBinaryOp::Less => {
-                                Self::check_integer_comparison(
-                                    &left.ty,
-                                    &right.ty,
-                                );
-                                ("slt", "i32")
+                                if !Self::is_integer_type(&left_value.ty) { panic!("LLVM ERR: 크기 비교는 정수 타입이 필요합니다."); }
+                                if Self::is_signed_integer_type(&left_value.ty) { "slt" } else { "ult" }
                             }
-
                             AirBinaryOp::Greater => {
-                                Self::check_integer_comparison(
-                                    &left.ty,
-                                    &right.ty,
-                                );
-                                ("sgt", "i32")
+                                if !Self::is_integer_type(&left_value.ty) { panic!("LLVM ERR: 크기 비교는 정수 타입이 필요합니다."); }
+                                if Self::is_signed_integer_type(&left_value.ty) { "sgt" } else { "ugt" }
                             }
-
                             AirBinaryOp::LessEqual => {
-                                Self::check_integer_comparison(
-                                    &left.ty,
-                                    &right.ty,
-                                );
-                                ("sle", "i32")
+                                if !Self::is_integer_type(&left_value.ty) { panic!("LLVM ERR: 크기 비교는 정수 타입이 필요합니다."); }
+                                if Self::is_signed_integer_type(&left_value.ty) { "sle" } else { "ule" }
                             }
-
                             AirBinaryOp::GreaterEqual => {
-                                Self::check_integer_comparison(
-                                    &left.ty,
-                                    &right.ty,
-                                );
-                                ("sge", "i32")
+                                if !Self::is_integer_type(&left_value.ty) { panic!("LLVM ERR: 크기 비교는 정수 타입이 필요합니다."); }
+                                if Self::is_signed_integer_type(&left_value.ty) { "sge" } else { "uge" }
                             }
-
                             _ => unreachable!(),
                         };
-
+                        if !Self::is_integer_type(&left_value.ty) && left_value.ty != AirType::Bool {
+                            panic!("LLVM ERR: ==와 !=는 정수와 bool만 지원합니다.");
+                        }
                         self.output.push_str(&format!(
                             "    %t{} = icmp {} {} {}, {}\n",
-                            destination,
-                            predicate,
-                            llvm_type,
-                            left.operand,
-                            right.operand
+                            destination, predicate, Self::llvm_type(&left_value.ty), left_value.operand, right_value.operand
                         ));
-
-                        result_type = AirType::Bool;
+                        AirType::Bool
                     }
-                }
+                };
 
                 self.temporary_types.insert(*destination, result_type);
             }
@@ -324,26 +359,69 @@ impl LlvmGenerator {
                 );
             }
 
-            AirInstruction::Let { name, ty, value } => {
-                let value = self.value(value);
-                let declared_type = ty.clone().unwrap_or_else(|| value.ty.clone());
-
-                if declared_type != value.ty {
+            AirInstruction::Let { name, ty, value, mutable } => {
+                let mut generated = self.value(value);
+                let declared_type = ty.clone().unwrap_or_else(|| generated.ty.clone());
+                if matches!(value, AirValue::Integer(_)) && Self::is_integer_type(&declared_type) {
+                    generated.ty = declared_type.clone();
+                }
+                if declared_type != generated.ty {
                     panic!(
-                        "LLVM ERR: 변수 '{}'의 선언 타입과 초기값 타입이 다릅니다.",
-                        name
+                        "LLVM ERR: 변수 '{}'의 선언 타입과 초기값 타입이 다릅니다. 선언: {:?}, 실제: {:?}",
+                        name, declared_type, generated.ty
                     );
                 }
 
-                self.variables.insert(name.clone(), value);
+                if *mutable {
+                    let key = instruction as *const AirInstruction as usize;
+                    let slot = self.slot_by_instruction.get(&key).cloned().unwrap_or_else(|| {
+                        panic!("LLVM ERR: 가변 변수 '{}'의 저장 공간이 없습니다.", name)
+                    });
+                    self.variables.remove(name);
+                    self.active_mutable_slots.insert(name.clone(), slot.clone());
+                    self.mutable_types.insert(name.clone(), declared_type.clone());
+                    self.output.push_str(&format!(
+                        "    store {} {}, ptr {}\n",
+                        Self::llvm_type(&declared_type), generated.operand, slot
+                    ));
+                } else {
+                    self.active_mutable_slots.remove(name);
+                    self.mutable_types.remove(name);
+                    self.variables.insert(name.clone(), generated);
+                }
+            }
+
+            AirInstruction::Assign { name, value } => {
+                let slot = self.active_mutable_slots.get(name).cloned().unwrap_or_else(|| {
+                    panic!("LLVM ERR: 불변이거나 선언되지 않은 변수 '{}'에 대입했습니다.", name)
+                });
+                let expected_type = self.mutable_types.get(name).cloned().unwrap_or_else(|| {
+                    panic!("LLVM ERR: 가변 변수 '{}'의 타입 정보가 없습니다.", name)
+                });
+                let mut generated = self.value(value);
+                if matches!(value, AirValue::Integer(_)) && Self::is_integer_type(&expected_type) {
+                    generated.ty = expected_type.clone();
+                }
+                if generated.ty != expected_type {
+                    panic!("LLVM ERR: 변수 '{}'에 대입하는 값의 타입이 다릅니다.", name);
+                }
+                self.output.push_str(&format!(
+                    "    store {} {}, ptr {}\n",
+                    Self::llvm_type(&expected_type), generated.operand, slot
+                ));
             }
 
             AirInstruction::Return { value } => {
-                let value = self.value(value);
+                let mut generated = self.value(value);
+                if matches!(value, AirValue::Integer(_)) && Self::is_integer_type(&self.current_return_type) {
+                    generated.ty = self.current_return_type.clone();
+                }
+                if generated.ty != self.current_return_type {
+                    panic!("LLVM ERR: 반환 값의 타입이 함수 반환형과 다릅니다.");
+                }
                 self.output.push_str(&format!(
                     "    ret {} {}\n",
-                    Self::llvm_type(&value.ty),
-                    value.operand
+                    Self::llvm_type(&generated.ty), generated.operand
                 ));
                 self.current_terminated = true;
             }
@@ -359,8 +437,10 @@ impl LlvmGenerator {
 
                     let value = self.value(&args[0]);
                     let format_string = match (function.as_str(), &value.ty) {
-                        ("print", AirType::I32) => "@.fmt.print.i32",
-                        ("println", AirType::I32) => "@.fmt.println.i32",
+                        ("print", AirType::I8 | AirType::I16 | AirType::I32) => "@.fmt.print.i32",
+                        ("println", AirType::I8 | AirType::I16 | AirType::I32) => "@.fmt.println.i32",
+                        ("print", AirType::U8 | AirType::U16 | AirType::U32) => "@.fmt.print.u32",
+                        ("println", AirType::U8 | AirType::U16 | AirType::U32) => "@.fmt.println.u32",
 
                         ("print", AirType::Str) => "@.fmt.print.str",
                         ("println", AirType::Str) => "@.fmt.println.str",
@@ -387,7 +467,11 @@ impl LlvmGenerator {
                     };
 
                     let (llvm_type, operand) = match &value.ty {
-                        AirType::I32 => ("i32", value.operand.clone()),
+                        AirType::I8 => ("i32", self.promote_integer(&value.operand, "i8", true)),
+                        AirType::I16 => ("i32", self.promote_integer(&value.operand, "i16", true)),
+                        AirType::I32 | AirType::U32 => ("i32", value.operand.clone()),
+                        AirType::U8 => ("i32", self.promote_integer(&value.operand, "i8", false)),
+                        AirType::U16 => ("i32", self.promote_integer(&value.operand, "i16", false)),
                         AirType::Str => ("ptr", value.operand.clone()),
                         AirType::Bool => ("ptr", self.bool_string_pointer(&value.operand)),
                         AirType::Void => panic!("LLVM ERR: void 값은 출력할 수 없습니다."),
@@ -412,7 +496,10 @@ impl LlvmGenerator {
 
                     let mut generated_args = Vec::with_capacity(args.len());
                     for (arg, expected_type) in args.iter().zip(param_types.iter()) {
-                        let value = self.value(arg);
+                        let mut value = self.value(arg);
+                        if matches!(arg, AirValue::Integer(_)) && Self::is_integer_type(expected_type) {
+                            value.ty = expected_type.clone();
+                        }
                         if &value.ty != expected_type {
                             panic!("LLVM ERR: 함수 '{function}'의 인자 타입이 맞지 않습니다.");
                         }
@@ -454,6 +541,10 @@ impl LlvmGenerator {
             } => {
                 self.generate_while(condition_instructions, condition, body);
             }
+
+            AirInstruction::For { name, start, end, body } => {
+                self.generate_for(instruction, name, start, end, body);
+            }
         }
     }
 
@@ -483,11 +574,15 @@ impl LlvmGenerator {
         // 바깥쪽 변수는 각 분기에서 읽을 수 있지만,
         // 분기 안에서 선언된 변수는 분기 밖으로 유출되지 않는다.
         let outer_variables = self.variables.clone();
+        let outer_mutable_slots = self.active_mutable_slots.clone();
+        let outer_mutable_types = self.mutable_types.clone();
 
         self.output.push_str(&format!("{then_label}:\n"));
         self.current_block = then_label.clone();
         self.current_terminated = false;
         self.variables = outer_variables.clone();
+        self.active_mutable_slots = outer_mutable_slots.clone();
+        self.mutable_types = outer_mutable_types.clone();
 
         self.generate_instructions(then_body);
 
@@ -501,6 +596,8 @@ impl LlvmGenerator {
         self.current_block = else_label.clone();
         self.current_terminated = false;
         self.variables = outer_variables.clone();
+        self.active_mutable_slots = outer_mutable_slots.clone();
+        self.mutable_types = outer_mutable_types.clone();
 
         if let Some(else_body) = else_body {
             self.generate_instructions(else_body);
@@ -516,6 +613,8 @@ impl LlvmGenerator {
         self.current_block = end_label.clone();
 
         self.variables = outer_variables;
+        self.active_mutable_slots = outer_mutable_slots;
+        self.mutable_types = outer_mutable_types;
         self.current_terminated = false;
     }
 
@@ -634,6 +733,102 @@ impl LlvmGenerator {
         );
     }
 
+    fn generate_for(
+        &mut self,
+        instruction: &AirInstruction,
+        name: &str,
+        start: &AirValue,
+        end: &AirValue,
+        body: &[AirInstruction],
+    ) {
+        let key = instruction as *const AirInstruction as usize;
+        let slot = self.slot_by_instruction.get(&key).cloned().unwrap_or_else(|| {
+            panic!("LLVM ERR: for 반복 변수의 저장 공간이 없습니다.")
+        });
+
+        // 범위 시작과 끝은 반복문에 진입하기 전에 한 번만 평가한다.
+        let mut start_value = self.value(start);
+        let mut end_value = self.value(end);
+        if matches!(start, AirValue::Integer(_)) && Self::is_integer_type(&end_value.ty) {
+            start_value.ty = end_value.ty.clone();
+        } else if matches!(end, AirValue::Integer(_)) && Self::is_integer_type(&start_value.ty) {
+            end_value.ty = start_value.ty.clone();
+        }
+        if !Self::is_integer_type(&start_value.ty) || start_value.ty != end_value.ty {
+            panic!("LLVM ERR: for 범위는 같은 정수 타입이어야 합니다.");
+        }
+        let index_type = start_value.ty.clone();
+
+        let outer_variables = self.variables.clone();
+        let outer_mutable_slots = self.active_mutable_slots.clone();
+        let outer_mutable_types = self.mutable_types.clone();
+
+        self.variables.remove(name);
+        self.active_mutable_slots.insert(name.to_string(), slot.clone());
+        self.mutable_types.insert(name.to_string(), index_type.clone());
+        self.output.push_str(&format!(
+            "    store {} {}, ptr {}\n",
+            Self::llvm_type(&index_type), start_value.operand, slot
+        ));
+
+        let for_id = self.next_for;
+        self.next_for += 1;
+        let condition_label = format!("for.condition.{for_id}");
+        let body_label = format!("for.body.{for_id}");
+        let end_label = format!("for.end.{for_id}");
+
+        self.output.push_str(&format!("    br label %{condition_label}\n"));
+        self.current_terminated = true;
+
+        self.output.push_str(&format!("{condition_label}:\n"));
+        self.current_block = condition_label.clone();
+        self.current_terminated = false;
+        let index = self.value(&AirValue::Variable(name.to_string()));
+        let predicate = if Self::is_signed_integer_type(&index_type) { "slt" } else { "ult" };
+        let condition_name = format!("%for.cond.{for_id}");
+        self.output.push_str(&format!(
+            "    {condition_name} = icmp {predicate} {} {}, {}\n",
+            Self::llvm_type(&index_type), index.operand, end_value.operand
+        ));
+        self.output.push_str(&format!(
+            "    br i1 {condition_name}, label %{body_label}, label %{end_label}\n"
+        ));
+        self.current_terminated = true;
+
+        self.output.push_str(&format!("{body_label}:\n"));
+        self.current_block = body_label;
+        self.current_terminated = false;
+        let loop_variables = self.variables.clone();
+        let loop_mutable_slots = self.active_mutable_slots.clone();
+        let loop_mutable_types = self.mutable_types.clone();
+        self.generate_instructions(body);
+        self.variables = loop_variables;
+        self.active_mutable_slots = loop_mutable_slots;
+        self.mutable_types = loop_mutable_types;
+
+        if !self.current_terminated {
+            let index = self.value(&AirValue::Variable(name.to_string()));
+            let next_value = format!("%for.next.{for_id}");
+            self.output.push_str(&format!(
+                "    {next_value} = add {} {}, 1\n",
+                Self::llvm_type(&index_type), index.operand
+            ));
+            self.output.push_str(&format!(
+                "    store {} {next_value}, ptr {slot}\n",
+                Self::llvm_type(&index_type)
+            ));
+            self.output.push_str(&format!("    br label %{condition_label}\n"));
+            self.current_terminated = true;
+        }
+
+        self.output.push_str(&format!("{end_label}:\n"));
+        self.current_block = end_label;
+        self.variables = outer_variables;
+        self.active_mutable_slots = outer_mutable_slots;
+        self.mutable_types = outer_mutable_types;
+        self.current_terminated = false;
+    }
+
     fn generate_while(
         &mut self,
         condition_instructions: &[AirInstruction],
@@ -643,70 +838,53 @@ impl LlvmGenerator {
         let while_id = self.next_while;
         self.next_while += 1;
 
-        let condition_label =
-            format!("while.condition.{while_id}");
-        let body_label =
-            format!("while.body.{while_id}");
-        let end_label =
-            format!("while.end.{while_id}");
+        let condition_label = format!("while.condition.{while_id}");
+        let body_label = format!("while.body.{while_id}");
+        let end_label = format!("while.end.{while_id}");
 
-        // 현재 블록에서 반복 조건 블록으로 이동한다.
-        self.output.push_str(&format!(
-            "    br label %{condition_label}\n"
-        ));
+        self.output.push_str(&format!("    br label %{condition_label}\n"));
         self.current_terminated = true;
 
         let outer_variables = self.variables.clone();
+        let outer_mutable_slots = self.active_mutable_slots.clone();
+        let outer_mutable_types = self.mutable_types.clone();
 
-        // 조건 블록: 반복할 때마다 다시 실행된다.
-        self.output.push_str(
-            &format!("{condition_label}:\n")
-        );
-
+        self.output.push_str(&format!("{condition_label}:\n"));
         self.current_block = condition_label.clone();
         self.current_terminated = false;
         self.variables = outer_variables.clone();
-
+        self.active_mutable_slots = outer_mutable_slots.clone();
+        self.mutable_types = outer_mutable_types.clone();
         self.generate_instructions(condition_instructions);
 
         let condition = self.value(condition);
-
         if condition.ty != AirType::Bool {
-            panic!(
-                "LLVM ERR: while 조건식에는 bool 타입이 필요합니다."
-            );
+            panic!("LLVM ERR: while 조건식에는 bool 타입이 필요합니다.");
         }
-
-        // 참이면 본문으로, 거짓이면 반복문 종료 지점으로 이동한다.
         self.output.push_str(&format!(
             "    br i1 {}, label %{}, label %{}\n",
-            condition.operand,
-            body_label,
-            end_label,
+            condition.operand, body_label, end_label,
         ));
         self.current_terminated = true;
 
-        // 반복문 본문
         self.output.push_str(&format!("{body_label}:\n"));
         self.current_block = body_label.clone();
         self.current_terminated = false;
         self.variables = outer_variables.clone();
-
+        self.active_mutable_slots = outer_mutable_slots.clone();
+        self.mutable_types = outer_mutable_types.clone();
         self.generate_instructions(body);
 
-        // 본문이 return 등으로 끝나지 않았다면 조건으로 돌아간다.
         if !self.current_terminated {
-            self.output.push_str(&format!(
-                "    br label %{condition_label}\n"
-            ));
+            self.output.push_str(&format!("    br label %{condition_label}\n"));
             self.current_terminated = true;
         }
 
-        // 반복문 종료 지점
         self.output.push_str(&format!("{end_label}:\n"));
-        self.current_block = end_label.clone();
-
+        self.current_block = end_label;
         self.variables = outer_variables;
+        self.active_mutable_slots = outer_mutable_slots;
+        self.mutable_types = outer_mutable_types;
         self.current_terminated = false;
     }
 
@@ -715,6 +893,11 @@ impl LlvmGenerator {
             AirValue::Integer(value) => GeneratedValue {
                 operand: value.to_string(),
                 ty: AirType::I32,
+            },
+
+            AirValue::TypedInteger(value, ty) => GeneratedValue {
+                operand: value.to_string(),
+                ty: ty.clone(),
             },
 
             AirValue::Bool(value) => GeneratedValue {
@@ -744,32 +927,47 @@ impl LlvmGenerator {
                 }
             }
 
-            AirValue::Variable(name) => self
-                .variables
-                .get(name)
-                .cloned()
-                .unwrap_or_else(|| {
-                    panic!("LLVM ERR: 변수를 찾을 수 없습니다: {name}")
-                }),
+            AirValue::Variable(name) => {
+                if let Some(slot) = self.active_mutable_slots.get(name).cloned() {
+                    let ty = self.mutable_types.get(name).cloned().unwrap_or_else(|| {
+                        panic!("LLVM ERR: 가변 변수 '{name}'의 타입을 찾을 수 없습니다.")
+                    });
+                    let load = format!("%load{}", self.next_load);
+                    self.next_load += 1;
+                    self.output.push_str(&format!(
+                        "    {load} = load {}, ptr {slot}\n",
+                        Self::llvm_type(&ty)
+                    ));
+                    GeneratedValue { operand: load, ty }
+                } else {
+                    self.variables.get(name).cloned().unwrap_or_else(|| {
+                        panic!("LLVM ERR: 변수를 찾을 수 없습니다: {name}")
+                    })
+                }
+            },
         }
     }
 
     fn llvm_type(ty: &AirType) -> &'static str {
         match ty {
-            AirType::I32 => "i32",
+            AirType::I8 | AirType::U8 => "i8",
+            AirType::I16 | AirType::U16 => "i16",
+            AirType::I32 | AirType::U32 => "i32",
             AirType::Bool => "i1",
             AirType::Str => "ptr",
             AirType::Void => "void",
-            AirType::Named(name) => {
-                panic!("LLVM ERR: 지원하지 않는 타입: {name}");
-            }
+            AirType::Named(name) => panic!("LLVM ERR: 지원하지 않는 타입: {name}"),
         }
     }
 
-    fn check_integer_comparison(left: &AirType, right: &AirType) {
-        if *left != AirType::I32 || *right != AirType::I32 {
-            panic!("LLVM ERR: 크기 비교에는 i32 값이 필요합니다.");
-        }
+    fn promote_integer(&mut self, operand: &str, source_type: &str, signed: bool) -> String {
+        let name = format!("%promoted{}", self.next_promoted);
+        self.next_promoted += 1;
+        let extension = if signed { "sext" } else { "zext" };
+        self.output.push_str(&format!(
+            "    {name} = {extension} {source_type} {operand} to i32\n"
+        ));
+        name
     }
 
     fn bool_string_pointer(&mut self, condition: &str) -> String {

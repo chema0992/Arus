@@ -1,29 +1,230 @@
-main
+script
 
-fn add(a: i32, b: i32, c: bool) -> i32 {
-    print("그리고 ")
-    print(c)
-    println("이렇게 이어서도 출력이 됨")
+println("=== Arus Syntax Test ===")
+
+// ========================================
+// 기본 타입
+// ========================================
+
+let a: i8 = 10
+let b: i16 = 20
+let c: i32 = 30
+
+let ua: u8 = 40
+let ub: u16 = 50
+let uc: u32 = 60
+
+let flag: bool = true
+let text: str = "Arus"
+
+// ========================================
+// 타입 추론
+// ========================================
+
+let inferred_i32 = 100
+let inferred_bool = false
+let inferred_str = "inferred"
+
+// ========================================
+// mut + 대입
+// ========================================
+
+mut x: i32 = 10
+
+println(x)
+
+x = 20
+println(x)
+
+x = x + 5
+println(x)
+
+// ========================================
+// 산술 연산
+// ========================================
+
+let add = 10 + 5
+let sub = 10 - 5
+let mul = 10 * 5
+let div = 10 / 5
+
+println(add)
+println(sub)
+println(mul)
+println(div)
+
+// ========================================
+// 비트 연산
+// ========================================
+
+let shl = 1 << 4
+let shr = 32 >> 2
+
+let bit_and = 12 & 10
+let bit_xor = 12 ^ 10
+let bit_or = 12 | 10
+
+println(shl)
+println(shr)
+println(bit_and)
+println(bit_xor)
+println(bit_or)
+
+// ========================================
+// 연산자 우선순위
+// ========================================
+
+let priority1 = 1 + 2 << 3
+let priority2 = 12 & 10 ^ 3 | 1
+let priority3 = 2 + 3 * 4
+let priority4 = 100 >> 2 + 1
+
+println(priority1)
+println(priority2)
+println(priority3)
+println(priority4)
+
+// ========================================
+// 비교 연산
+// ========================================
+
+let eq = 10 == 10
+let neq = 10 != 20
+
+let less = 10 < 20
+let greater = 20 > 10
+
+let less_equal = 10 <= 10
+let greater_equal = 20 >= 20
+
+println(eq)
+println(neq)
+println(less)
+println(greater)
+println(less_equal)
+println(greater_equal)
+
+// ========================================
+// 논리 연산
+// ========================================
+
+let not_test = !false
+
+let and_test = true && false
+let or_test = true || false
+
+println(not_test)
+println(and_test)
+println(or_test)
+
+// ========================================
+// if / else if / else
+// ========================================
+
+if x > 100 {
+    println("x > 100")
+} else if x > 20 {
+    println("x > 20")
+} else {
+    println("x <= 20")
+}
+
+// ========================================
+// while
+// ========================================
+
+mut counter: i32 = 0
+
+while counter < 3 {
+    println(counter)
+    counter = counter + 1
+}
+
+// ========================================
+// for + range
+// 0 이상 5 미만
+// ========================================
+
+for i in 0..5 {
+    println(i)
+}
+
+// ========================================
+// 함수
+// ========================================
+
+fn add(a: i32, b: i32) -> i32 {
     return a + b
 }
 
-fn main() {
-    println(add(1, 2, true))
-    let x: i32 = 50
-    let y: i32 = 20
-    let mystr: str = "문자열"
-    println(mystr)
-
-    if x > y {
-        println("x가 y보다 더 큼")
-    }
-
-    let a: i32 = 1 + 2 << 3
-    let b: i32 = 12 & 10 ^ 3 | 1
-
-    if a != 0 {
-        println("a는 0이 아님")
-    }
-
-    return 0
+fn multiply(a: i32, b: i32) -> i32 {
+    return a * b
 }
+
+let result1: i32 = add(10, 20)
+let result2: i32 = multiply(4, 5)
+
+println(result1)
+println(result2)
+
+// ========================================
+// 함수 내부 mut
+// ========================================
+
+fn counter_test(value: i32) -> i32 {
+    mut result: i32 = value
+
+    result = result + 10
+    result = result * 2
+
+    return result
+}
+
+let result3: i32 = counter_test(5)
+
+println(result3)
+
+// ========================================
+// 함수 + 조건문 + 반복문
+// ========================================
+
+fn complex(n: i32) -> i32 {
+    mut result: i32 = 0
+    mut i: i32 = 0
+
+    while i < n {
+        if i & 1 == 0 {
+            result = result + i
+        } else {
+            result = result + 1
+        }
+
+        i = i + 1
+    }
+
+    return result
+}
+
+let result4: i32 = complex(10)
+
+println(result4)
+
+// ========================================
+// 함수 인자 여러 개
+// ========================================
+
+fn calculate(a: i32, b: i32, c: i32) -> i32 {
+    return a + b * c
+}
+
+let result5: i32 = calculate(2, 3, 4)
+
+println(result5)
+
+// ========================================
+// 최종 출력
+// ========================================
+
+println("=== Test Complete ===")
+
+return 0
