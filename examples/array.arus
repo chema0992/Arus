@@ -1,0 +1,6 @@
+main
+
+fn main() {
+    let array: [i16; 2] = [1, 2]
+    return 0
+}

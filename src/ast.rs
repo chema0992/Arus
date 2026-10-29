@@ -41,6 +41,7 @@ pub enum Expr {
     String(String),
     Bool(bool),
     Ident(String),
+    Array(Vec<Expr>),
     Call { name: String, args: Vec<Expr> },
     #[allow(dead_code)]
     InterpolatedString { parts: Vec<StringPart> },
@@ -71,6 +72,10 @@ pub enum Type {
     I8, I16, I32, U8, U16, U32,
     Str, Bool,
     Named(String),
+    Array {
+        element_type: Box<Type>,
+        size: usize,
+    },
 }
 
 #[derive(Debug)]

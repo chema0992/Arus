@@ -132,6 +132,7 @@ pub enum AirValue {
     String(String),
     Variable(String),
     Temporary(u32),
+    Array(Vec<AirValue>),
 }
 
 #[derive(Debug, Clone, PartialEq)]
@@ -146,6 +147,10 @@ pub enum AirType {
     Bool,
     Void,
     Named(String),
+    Array {
+        element_type: Box<AirType>,
+        size: usize,
+    },
 }
 
 impl AirProgram {
@@ -237,6 +242,10 @@ impl AirGenerator {
             Type::Str => AirType::Str,
             Type::Bool => AirType::Bool,
             Type::Named(name) => AirType::Named(name.clone()),
+            Type::Array { element_type, size } => AirType::Array {
+                element_type: Box::new(Self::convert_type(element_type)),
+                size: *size,
+            },
         }
     }
 
@@ -462,6 +471,12 @@ impl AirGenerator {
             Expr::Bool(_) => Some(AirType::Bool),
             Expr::String(_) => Some(AirType::Str),
             Expr::Ident(name) => self.variable_types.get(name).cloned(),
+            Expr::Array(elements) => elements.first()
+                .and_then(|element| self.infer_expr_type(element))
+                .map(|element_type| AirType::Array {
+                    element_type: Box::new(element_type),
+                    size: elements.len(),
+                }),
             Expr::Call { name, .. } => self.function_signatures.get(name).map(|signature| signature.1.clone()),
             Expr::InterpolatedString { .. } => Some(AirType::Str),
             Expr::Unary { operator: UnaryOp::Not, .. } => Some(AirType::Bool),
@@ -503,6 +518,19 @@ impl AirGenerator {
             Expr::Bool(value) => AirValue::Bool(*value),
             Expr::String(value) => AirValue::String(value.clone()),
             Expr::Ident(name) => AirValue::Variable(name.clone()),
+
+            Expr::Array(elements) => {
+                let expected_element_type = match expected {
+                    Some(AirType::Array { element_type, .. }) => Some(element_type.as_ref()),
+                    _ => None,
+                };
+                let values = elements
+                    .iter()
+                    .map(|element| self.generate_expr_expected(element, expected_element_type))
+                    .collect();
+
+                AirValue::Array(values)
+            }
 
             Expr::Call { name, args } => {
                 let expected_params = self.function_signatures.get(name).map(|signature| signature.0.clone());
@@ -871,6 +899,10 @@ impl AirPrinter {
             AirValue::String(value) => format!("{value:?}"),
             AirValue::Variable(name) => name.clone(),
             AirValue::Temporary(temp) => format!("%{temp}"),
+            AirValue::Array(elements) => format!(
+                "[{}]",
+                elements.iter().map(Self::print_value).collect::<Vec<_>>().join(", ")
+            ),
         }
     }
 
@@ -886,6 +918,9 @@ impl AirPrinter {
             AirType::Bool => "bool".to_string(),
             AirType::Void => "void".to_string(),
             AirType::Named(name) => name.clone(),
+            AirType::Array { element_type, size } => {
+                format!("[{}; {}]", Self::type_name(element_type), size)
+            }
         }
     }
 }
@@ -1039,6 +1074,22 @@ impl AirTypeChecker {
             }
             AirValue::Bool(_) => Ok(AirType::Bool),
             AirValue::String(_) => Ok(AirType::Str),
+            AirValue::Array(elements) => {
+                let Some(first) = elements.first() else {
+                    return Err("AIR Type ERR: 빈 배열은 타입을 추론할 수 없습니다. 배열 타입을 명시하세요.".to_string());
+                };
+                let element_type = Self::value_type(first, variables, temporaries)?;
+                for (index, element) in elements.iter().enumerate().skip(1) {
+                    let actual = Self::value_type_in_context(element, &element_type, variables, temporaries)?;
+                    if actual != element_type {
+                        return Err(format!(
+                            "AIR Type ERR: 배열의 {}번째 원소 타입이 다릅니다. 기대: {:?}, 실제: {:?}",
+                            index + 1, element_type, actual
+                        ));
+                    }
+                }
+                Ok(AirType::Array { element_type: Box::new(element_type), size: elements.len() })
+            }
             AirValue::Variable(name) => variables.get(name).cloned().ok_or_else(|| {
                 format!("AIR Type ERR: 선언되지 않은 변수 '{}'", name)
             }),
@@ -1054,6 +1105,26 @@ impl AirTypeChecker {
         variables: &HashMap<String, AirType>,
         temporaries: &HashMap<u32, AirType>,
     ) -> Result<AirType, String> {
+        if let (AirValue::Array(elements), AirType::Array { element_type, size }) = (value, expected) {
+            if elements.len() != *size {
+                return Err(format!(
+                    "AIR Type ERR: 배열 길이가 다릅니다. 기대: {}, 실제: {}", size, elements.len()
+                ));
+            }
+            for (index, element) in elements.iter().enumerate() {
+                let actual = Self::value_type_in_context(
+                    element, element_type.as_ref(), variables, temporaries
+                )?;
+                if actual != **element_type {
+                    return Err(format!(
+                        "AIR Type ERR: 배열의 {}번째 원소 타입이 다릅니다. 기대: {:?}, 실제: {:?}",
+                        index + 1, element_type, actual
+                    ));
+                }
+            }
+            return Ok(expected.clone());
+        }
+
         if let AirValue::Integer(number) = value {
             if Self::is_integer_type(expected) {
                 if Self::integer_fits(*number, expected) {

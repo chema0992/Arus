@@ -34,6 +34,10 @@ impl Parser {
         let mut functions = Vec::new();
         if mode == ProgramMode::Main {
             while *self.peek() != Token::EOF {
+                if *self.peek() == Token::Semicolon {
+                    self.advance();
+                    continue;
+                }
                 functions.push(self.parse_function());
             }
         } else {
@@ -41,6 +45,10 @@ impl Parser {
             // 기존 AST/LLVM 파이프라인을 재사용하도록 최상위 문장을 합성 main에 담는다.
             let mut script_body = Vec::new();
             while *self.peek() != Token::EOF {
+                if *self.peek() == Token::Semicolon {
+                    self.advance();
+                    continue;
+                }
                 if *self.peek() == Token::Fn {
                     let function = self.parse_function();
                     if function.name == "main" {
@@ -135,6 +143,9 @@ impl Parser {
                 Token::RightBrace => {
                     self.advance();
                     break;
+                }
+                Token::Semicolon => {
+                    self.advance();
                 }
                 Token::EOF => panic!("Parser ERR: 블록의 닫는 '}}'가 없습니다."),
                 _ => body.push(self.parse_statement()),
@@ -275,6 +286,33 @@ impl Parser {
         }
     }
 
+    fn parse_array_literal(&mut self) -> Expr {
+        let mut elements = Vec::new();
+
+        if *self.peek() != Token::RightBracket {
+            loop {
+                elements.push(self.parse_expression());
+
+                if *self.peek() == Token::Comma {
+                    self.advance();
+
+                    if *self.peek() == Token::RightBracket {
+                        panic!("Parser ERR: 배열 원소 뒤에 불필요한 ','가 있습니다.");
+                    }
+                } else {
+                    break;
+                }
+            }
+        }
+
+        match self.advance() {
+            Token::RightBracket => {}
+            _ => panic!("Parser ERR: 배열 리터럴에 ']'가 필요합니다."),
+        }
+
+        Expr::Array(elements)
+    }
+
     fn parse_let(&mut self, mutable: bool) -> Stmt {
         self.advance();
         let name = match self.advance() {
@@ -308,6 +346,35 @@ impl Parser {
 
     fn parse_type(&mut self) -> Type {
         match self.advance() {
+            Token::LeftBracket => {
+                let element_type = self.parse_type();
+
+                match self.advance() {
+                    Token::Semicolon => {}
+                    _ => panic!("Parser ERR: 배열 타입에는 ';'가 필요합니다."),
+                }
+
+                let size = match self.advance() {
+                    Token::Integer(value) => {
+                        if value < 0 {
+                            panic!("Parser ERR: 배열 크기는 음수일 수 없습니다.");
+                        }
+
+                        value as usize
+                    }
+                    _ => panic!("Parser ERR: 배열 크기는 정수여야 합니다."),
+                };
+
+                match self.advance() {
+                    Token::RightBracket => {}
+                    _ => panic!("Parser ERR: 배열 타입에는 ']'가 필요합니다."),
+                }
+
+                Type::Array {
+                    element_type: Box::new(element_type),
+                    size,
+                }
+            }
             Token::Ident(name) if name == "i8" => Type::I8,
             Token::Ident(name) if name == "i16" => Type::I16,
             Token::Ident(name) if name == "i32" => Type::I32,
@@ -512,6 +579,9 @@ impl Parser {
             Token::StringLiteral(value) => Expr::String(value),
             Token::True => Expr::Bool(true),
             Token::False => Expr::Bool(false),
+
+            Token::LeftBracket => self.parse_array_literal(),
+
             Token::Ident(name) => {
                 if *self.peek() == Token::LeftParen {
                     self.advance();
@@ -521,13 +591,16 @@ impl Parser {
                     Expr::Ident(name)
                 }
             }
+
             Token::LeftParen => {
                 let expr = self.parse_expression();
+
                 match self.advance() {
                     Token::RightParen => expr,
                     _ => panic!("Parser ERR: ')'가 필요합니다."),
                 }
             }
+
             _ => panic!("Parser ERR: 식이 필요합니다."),
         }
     }

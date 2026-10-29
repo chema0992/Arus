@@ -7,3 +7,5 @@ Cargo.lock
 *.ll
 
 arus_program
+
+note.md

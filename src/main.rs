@@ -9,7 +9,7 @@ mod llvm;
 mod parser;
 mod token;
 
-use air::{AirAnalyzer, AirProgram, AirTypeChecker};
+use air::{AirAnalyzer, AirPrinter, AirProgram, AirTypeChecker};
 use lexer::Lexer;
 use llvm::LlvmGenerator;
 use parser::Parser;
@@ -46,8 +46,12 @@ fn main() {
 
     let air = AirProgram::from_ast(&ast);
 
+    let air_text = AirPrinter::print(&air);
+    fs::write("output.air", &air_text)
+        .expect("AIR 파일 저장 실패");
+
     println!("=== AIR ===");
-    println!("{:#?}", air);
+    println!("{}", air_text);
 
     if let Err(error) = AirTypeChecker::check(&air) {
         eprintln!("{error}");

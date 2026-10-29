@@ -27,10 +27,6 @@ impl Lexer {
             let ch = self.input[self.position];
 
             let token = match ch {
-                ';' => {
-                    self.position += 1;
-                    continue;
-                }
                 '.' => {
                     if self.input.get(self.position + 1) == Some(&'.') {
                         self.position += 2;
@@ -169,6 +165,20 @@ impl Lexer {
                 '}' => {
                     self.position += 1;
                     Token::RightBrace
+                }
+                '[' => {
+                    self.position += 1;
+                    Token::LeftBracket
+                }
+
+                ']' => {
+                    self.position += 1;
+                    Token::RightBracket
+                }
+
+                ';' => {
+                    self.position += 1;
+                    Token::Semicolon
                 }
 
                 '"' => Token::StringLiteral(self.read_string()),

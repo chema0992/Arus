@@ -19,6 +19,7 @@ pub struct LlvmGenerator {
     temporary_types: HashMap<u32, AirType>,
     next_string: u32,
     next_slot: u32,
+    next_array: u32,
     next_load: u32,
     next_promoted: u32,
     next_call: u32,
@@ -60,6 +61,7 @@ impl LlvmGenerator {
             temporary_types: HashMap::new(),
             next_string: 0,
             next_slot: 0,
+            next_array: 0,
             next_load: 0,
             next_promoted: 0,
             next_call: 1,
@@ -94,6 +96,85 @@ impl LlvmGenerator {
         format!("{}{}", generator.globals, generator.output)
     }
 
+    fn infer_value_type(value: &AirValue) -> Option<AirType> {
+        match value {
+            AirValue::Integer(_) => Some(AirType::I32),
+            AirValue::TypedInteger(_, ty) => Some(ty.clone()),
+            AirValue::Bool(_) => Some(AirType::Bool),
+            AirValue::String(_) => Some(AirType::Str),
+            AirValue::Array(elements) => {
+                let first_type = Self::infer_value_type(elements.first()?)?;
+                if elements.iter().all(|element| Self::infer_value_type(element).as_ref() == Some(&first_type)) {
+                    Some(AirType::Array {
+                        element_type: Box::new(first_type),
+                        size: elements.len(),
+                    })
+                } else {
+                    None
+                }
+            }
+            AirValue::Variable(_) | AirValue::Temporary(_) => None,
+        }
+    }
+
+    fn store_array_elements(
+        &mut self,
+        slot: &str,
+        array_type: &AirType,
+        elements: &[AirValue],
+        array_id: u32,
+    ) {
+        let (element_type, size) = match array_type {
+            AirType::Array { element_type, size } => (element_type.as_ref(), *size),
+            _ => panic!("LLVM ERR: 배열 초기화에 배열 타입이 필요합니다."),
+        };
+        if elements.len() != size {
+            panic!(
+                "LLVM ERR: 배열 초기화 길이가 다릅니다. 기대: {}, 실제: {}",
+                size, elements.len()
+            );
+        }
+
+        let llvm_array_type = Self::llvm_type(array_type);
+        let llvm_element_type = Self::llvm_type(element_type);
+        for (index, element) in elements.iter().enumerate() {
+            let element_ptr = format!("%arr{array_id}.elem{index}");
+            self.output.push_str(&format!(
+                "    {element_ptr} = getelementptr inbounds {llvm_array_type}, ptr {slot}, i32 0, i32 {index}\n"
+            ));
+
+            if matches!(element_type, AirType::Array { .. }) {
+                if let AirValue::Array(nested_elements) = element {
+                    let nested_id = self.next_array;
+                    self.next_array += 1;
+                    self.store_array_elements(&element_ptr, element_type, nested_elements, nested_id);
+                } else {
+                    let generated = self.value(element);
+                    if generated.ty != *element_type {
+                        panic!("LLVM ERR: 중첩 배열 원소 타입이 선언과 다릅니다.");
+                    }
+                    self.output.push_str(&format!(
+                        "    store {llvm_element_type} {}, ptr {element_ptr}\n", generated.operand
+                    ));
+                }
+            } else {
+                let mut generated = self.value(element);
+                if matches!(element, AirValue::Integer(_)) && Self::is_integer_type(element_type) {
+                    generated.ty = element_type.clone();
+                }
+                if generated.ty != *element_type {
+                    panic!(
+                        "LLVM ERR: 배열 원소 타입이 선언과 다릅니다. 기대: {:?}, 실제: {:?}",
+                        element_type, generated.ty
+                    );
+                }
+                self.output.push_str(&format!(
+                    "    store {llvm_element_type} {}, ptr {element_ptr}\n", generated.operand
+                ));
+            }
+        }
+    }
+
     fn collect_mutable_slots(
         instructions: &[AirInstruction],
         slot_by_instruction: &mut HashMap<usize, String>,
@@ -108,9 +189,19 @@ impl LlvmGenerator {
                 let slot = format!("%slot{}", *next_slot);
                 *next_slot += 1;
                 slot_by_instruction.insert(key, slot.clone());
-                // A generously sized slot keeps all supported scalar values aligned and
-                // lets the opaque `ptr` be loaded/stored using the value's actual type.
-                allocas.push(format!("    {slot} = alloca i64, align 8\n"));
+                // Scalar variables keep the existing roomy slot. Fixed arrays need their
+                // exact aggregate type because elements are addressed with GEP.
+                let declared_type = match instruction {
+                    AirInstruction::Let { ty, value, .. } => {
+                        ty.clone().or_else(|| Self::infer_value_type(value))
+                    }
+                    _ => None,
+                };
+                let slot_type = match declared_type.as_ref() {
+                    Some(array_type @ AirType::Array { .. }) => Self::llvm_type(array_type),
+                    _ => "i64".to_string(),
+                };
+                allocas.push(format!("    {slot} = alloca {slot_type}, align 8\n"));
             }
 
             match instruction {
@@ -151,6 +242,7 @@ impl LlvmGenerator {
         self.slot_by_instruction.clear();
         self.temporary_types.clear();
         self.next_slot = 0;
+        self.next_array = 0;
         self.next_load = 0;
         self.next_promoted = 0;
         self.next_call = 1;
@@ -208,6 +300,7 @@ impl LlvmGenerator {
                 AirType::Bool => ("i1", "false"),
                 AirType::Str => ("ptr", "null"),
                 AirType::Void => ("void", ""),
+                AirType::Array { .. } => panic!("LLVM ERR: 배열 반환형은 아직 지원하지 않습니다."),
                 AirType::Named(name) => panic!("LLVM ERR: 지원하지 않는 반환 타입: {name}"),
             };
             if function.return_type == AirType::Void {
@@ -360,34 +453,92 @@ impl LlvmGenerator {
             }
 
             AirInstruction::Let { name, ty, value, mutable } => {
-                let mut generated = self.value(value);
-                let declared_type = ty.clone().unwrap_or_else(|| generated.ty.clone());
-                if matches!(value, AirValue::Integer(_)) && Self::is_integer_type(&declared_type) {
-                    generated.ty = declared_type.clone();
-                }
-                if declared_type != generated.ty {
-                    panic!(
-                        "LLVM ERR: 변수 '{}'의 선언 타입과 초기값 타입이 다릅니다. 선언: {:?}, 실제: {:?}",
-                        name, declared_type, generated.ty
-                    );
-                }
-
-                if *mutable {
-                    let key = instruction as *const AirInstruction as usize;
-                    let slot = self.slot_by_instruction.get(&key).cloned().unwrap_or_else(|| {
-                        panic!("LLVM ERR: 가변 변수 '{}'의 저장 공간이 없습니다.", name)
-                    });
-                    self.variables.remove(name);
-                    self.active_mutable_slots.insert(name.clone(), slot.clone());
-                    self.mutable_types.insert(name.clone(), declared_type.clone());
-                    self.output.push_str(&format!(
-                        "    store {} {}, ptr {}\n",
-                        Self::llvm_type(&declared_type), generated.operand, slot
-                    ));
+                // Array literals are lowered here into a real stack object plus per-element stores.
+                // They are not represented as a scalar LLVM operand.
+                let precomputed = if matches!(ty, Some(AirType::Array { .. })) || matches!(value, AirValue::Array(_)) {
+                    None
                 } else {
-                    self.active_mutable_slots.remove(name);
-                    self.mutable_types.remove(name);
-                    self.variables.insert(name.clone(), generated);
+                    Some(self.value(value))
+                };
+                let declared_type = ty.clone()
+                    .or_else(|| precomputed.as_ref().map(|generated| generated.ty.clone()))
+                    .or_else(|| Self::infer_value_type(value))
+                    .unwrap_or_else(|| panic!("LLVM ERR: 변수 '{}'의 타입을 추론할 수 없습니다.", name));
+
+                if let AirType::Array { .. } = &declared_type {
+                    let array_id = self.next_array;
+                    self.next_array += 1;
+                    let slot = if *mutable {
+                        let key = instruction as *const AirInstruction as usize;
+                        self.slot_by_instruction.get(&key).cloned().unwrap_or_else(|| {
+                            panic!("LLVM ERR: 배열 변수 '{}'의 저장 공간이 없습니다.", name)
+                        })
+                    } else {
+                        let slot = format!("%array{array_id}");
+                        let llvm_array_type = Self::llvm_type(&declared_type);
+                        self.output.push_str(&format!(
+                            "    {slot} = alloca {llvm_array_type}, align 8\n"
+                        ));
+                        slot
+                    };
+
+                    if let AirValue::Array(elements) = value {
+                        self.store_array_elements(&slot, &declared_type, elements, array_id);
+                    } else {
+                        let generated = precomputed.unwrap_or_else(|| self.value(value));
+                        if generated.ty != declared_type {
+                            panic!(
+                                "LLVM ERR: 변수 '{}'의 배열 초기값 타입이 다릅니다. 선언: {:?}, 실제: {:?}",
+                                name, declared_type, generated.ty
+                            );
+                        }
+                        let llvm_array_type = Self::llvm_type(&declared_type);
+                        self.output.push_str(&format!(
+                            "    store {llvm_array_type} {}, ptr {slot}\n", generated.operand
+                        ));
+                    }
+
+                    if *mutable {
+                        self.variables.remove(name);
+                        self.active_mutable_slots.insert(name.clone(), slot);
+                        self.mutable_types.insert(name.clone(), declared_type);
+                    } else {
+                        self.active_mutable_slots.remove(name);
+                        self.mutable_types.remove(name);
+                        self.variables.insert(name.clone(), GeneratedValue {
+                            operand: slot,
+                            ty: declared_type,
+                        });
+                    }
+                } else {
+                    let mut generated = precomputed.unwrap_or_else(|| self.value(value));
+                    if matches!(value, AirValue::Integer(_)) && Self::is_integer_type(&declared_type) {
+                        generated.ty = declared_type.clone();
+                    }
+                    if declared_type != generated.ty {
+                        panic!(
+                            "LLVM ERR: 변수 '{}'의 선언 타입과 초기값 타입이 다릅니다. 선언: {:?}, 실제: {:?}",
+                            name, declared_type, generated.ty
+                        );
+                    }
+
+                    if *mutable {
+                        let key = instruction as *const AirInstruction as usize;
+                        let slot = self.slot_by_instruction.get(&key).cloned().unwrap_or_else(|| {
+                            panic!("LLVM ERR: 가변 변수 '{}'의 저장 공간이 없습니다.", name)
+                        });
+                        self.variables.remove(name);
+                        self.active_mutable_slots.insert(name.clone(), slot.clone());
+                        self.mutable_types.insert(name.clone(), declared_type.clone());
+                        self.output.push_str(&format!(
+                            "    store {} {}, ptr {}\n",
+                            Self::llvm_type(&declared_type), generated.operand, slot
+                        ));
+                    } else {
+                        self.active_mutable_slots.remove(name);
+                        self.mutable_types.remove(name);
+                        self.variables.insert(name.clone(), generated);
+                    }
                 }
             }
 
@@ -398,17 +549,34 @@ impl LlvmGenerator {
                 let expected_type = self.mutable_types.get(name).cloned().unwrap_or_else(|| {
                     panic!("LLVM ERR: 가변 변수 '{}'의 타입 정보가 없습니다.", name)
                 });
-                let mut generated = self.value(value);
-                if matches!(value, AirValue::Integer(_)) && Self::is_integer_type(&expected_type) {
-                    generated.ty = expected_type.clone();
+                if matches!(expected_type, AirType::Array { .. }) {
+                    if let AirValue::Array(elements) = value {
+                        let array_id = self.next_array;
+                        self.next_array += 1;
+                        self.store_array_elements(&slot, &expected_type, elements, array_id);
+                    } else {
+                        let generated = self.value(value);
+                        if generated.ty != expected_type {
+                            panic!("LLVM ERR: 변수 '{}'에 대입하는 배열 타입이 다릅니다.", name);
+                        }
+                        let llvm_array_type = Self::llvm_type(&expected_type);
+                        self.output.push_str(&format!(
+                            "    store {llvm_array_type} {}, ptr {slot}\n", generated.operand
+                        ));
+                    }
+                } else {
+                    let mut generated = self.value(value);
+                    if matches!(value, AirValue::Integer(_)) && Self::is_integer_type(&expected_type) {
+                        generated.ty = expected_type.clone();
+                    }
+                    if generated.ty != expected_type {
+                        panic!("LLVM ERR: 변수 '{}'에 대입하는 값의 타입이 다릅니다.", name);
+                    }
+                    self.output.push_str(&format!(
+                        "    store {} {}, ptr {}\n",
+                        Self::llvm_type(&expected_type), generated.operand, slot
+                    ));
                 }
-                if generated.ty != expected_type {
-                    panic!("LLVM ERR: 변수 '{}'에 대입하는 값의 타입이 다릅니다.", name);
-                }
-                self.output.push_str(&format!(
-                    "    store {} {}, ptr {}\n",
-                    Self::llvm_type(&expected_type), generated.operand, slot
-                ));
             }
 
             AirInstruction::Return { value } => {
@@ -474,6 +642,7 @@ impl LlvmGenerator {
                         AirType::U16 => ("i32", self.promote_integer(&value.operand, "i16", false)),
                         AirType::Str => ("ptr", value.operand.clone()),
                         AirType::Bool => ("ptr", self.bool_string_pointer(&value.operand)),
+                        AirType::Array { .. } => panic!("LLVM ERR: 배열 전체를 print/println으로 출력할 수 없습니다."),
                         AirType::Void => panic!("LLVM ERR: void 값은 출력할 수 없습니다."),
                         AirType::Named(name) => panic!("LLVM ERR: 출력할 수 없는 타입입니다: {name}"),
                     };
@@ -940,22 +1109,40 @@ impl LlvmGenerator {
                     ));
                     GeneratedValue { operand: load, ty }
                 } else {
-                    self.variables.get(name).cloned().unwrap_or_else(|| {
+                    let generated = self.variables.get(name).cloned().unwrap_or_else(|| {
                         panic!("LLVM ERR: 변수를 찾을 수 없습니다: {name}")
-                    })
+                    });
+                    if matches!(generated.ty, AirType::Array { .. }) {
+                        let load = format!("%load{}", self.next_load);
+                        self.next_load += 1;
+                        let llvm_array_type = Self::llvm_type(&generated.ty);
+                        self.output.push_str(&format!(
+                            "    {load} = load {llvm_array_type}, ptr {}\n", generated.operand
+                        ));
+                        GeneratedValue { operand: load, ty: generated.ty }
+                    } else {
+                        generated
+                    }
                 }
+            },
+
+            AirValue::Array(_) => {
+                panic!("LLVM ERR: 배열 리터럴은 배열 변수 초기화 또는 대입에서 처리해야 합니다.")
             },
         }
     }
 
-    fn llvm_type(ty: &AirType) -> &'static str {
+    fn llvm_type(ty: &AirType) -> String {
         match ty {
-            AirType::I8 | AirType::U8 => "i8",
-            AirType::I16 | AirType::U16 => "i16",
-            AirType::I32 | AirType::U32 => "i32",
-            AirType::Bool => "i1",
-            AirType::Str => "ptr",
-            AirType::Void => "void",
+            AirType::I8 | AirType::U8 => "i8".to_string(),
+            AirType::I16 | AirType::U16 => "i16".to_string(),
+            AirType::I32 | AirType::U32 => "i32".to_string(),
+            AirType::Bool => "i1".to_string(),
+            AirType::Str => "ptr".to_string(),
+            AirType::Void => "void".to_string(),
+            AirType::Array { element_type, size } => {
+                format!("[{} x {}]", size, Self::llvm_type(element_type))
+            }
             AirType::Named(name) => panic!("LLVM ERR: 지원하지 않는 타입: {name}"),
         }
     }
