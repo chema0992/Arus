@@ -33,6 +33,7 @@ pub enum Stmt {
     While { condition: Expr, body: Vec<Stmt> },
     For { name: String, start: Expr, end: Expr, body: Vec<Stmt> },
     Assign { name: String, value: Expr },
+    AssignDeref { pointer: Expr, value: Expr },
 }
 
 #[derive(Debug)]
@@ -41,6 +42,8 @@ pub enum Expr {
     String(String),
     Bool(bool),
     Ident(String),
+    AddressOf(Box<Expr>),
+    Dereference(Box<Expr>),
     Array(Vec<Expr>),
     Call { name: String, args: Vec<Expr> },
     #[allow(dead_code)]
@@ -67,11 +70,22 @@ pub enum BinaryOp {
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub enum UnaryOp { Not }
 
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum PointerPermission {
+    Read,
+    Write,
+    ReadWrite,
+}
+
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub enum Type {
     I8, I16, I32, U8, U16, U32,
     Str, Bool,
     Named(String),
+    Pointer {
+        element_type: Box<Type>,
+        permission: PointerPermission,
+    },
     Array {
         element_type: Box<Type>,
         size: usize,

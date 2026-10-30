@@ -1,0 +1,11 @@
+main
+
+fn main() {
+    let value: i32 = 10
+    let p: i32 rw* = &value
+
+    *p = 50
+    println(*p)
+
+    return 0
+}

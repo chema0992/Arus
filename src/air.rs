@@ -92,6 +92,24 @@ pub enum AirInstruction {
         name: String,
         value: AirValue,
     },
+
+    AddressOf {
+        destination: u32,
+        variable: String,
+        pointer_type: AirType,
+    },
+
+    PointerLoad {
+        destination: u32,
+        pointer: AirValue,
+        pointer_type: AirType,
+    },
+
+    PointerStore {
+        pointer: AirValue,
+        value: AirValue,
+        pointer_type: AirType,
+    },
 }
 
 #[derive(Debug, Clone)]
@@ -150,6 +168,10 @@ pub enum AirType {
     Array {
         element_type: Box<AirType>,
         size: usize,
+    },
+    Pointer {
+        element_type: Box<AirType>,
+        permission: PointerPermission,
     },
 }
 
@@ -242,6 +264,10 @@ impl AirGenerator {
             Type::Str => AirType::Str,
             Type::Bool => AirType::Bool,
             Type::Named(name) => AirType::Named(name.clone()),
+            Type::Pointer { element_type, permission } => AirType::Pointer {
+                element_type: Box::new(Self::convert_type(element_type)),
+                permission: *permission,
+            },
             Type::Array { element_type, size } => AirType::Array {
                 element_type: Box::new(Self::convert_type(element_type)),
                 size: *size,
@@ -340,6 +366,23 @@ impl AirGenerator {
                 self.instructions.push(AirInstruction::Assign {
                     name: name.clone(),
                     value,
+                });
+            }
+
+            Stmt::AssignDeref { pointer, value } => {
+                let pointer_type = self.infer_expr_type(pointer)
+                    .unwrap_or_else(|| panic!("AIR ERR: 역참조 대입의 포인터 타입을 추론할 수 없습니다."));
+                let element_type = match &pointer_type {
+                    AirType::Pointer { element_type, .. } => element_type.as_ref().clone(),
+                    _ => panic!("AIR ERR: 역참조 대입에는 포인터가 필요합니다."),
+                };
+                let pointer_value = self.generate_expr_expected(pointer, Some(&pointer_type));
+                let value = self.generate_expr_expected(value, Some(&element_type));
+
+                self.instructions.push(AirInstruction::PointerStore {
+                    pointer: pointer_value,
+                    value,
+                    pointer_type,
                 });
             }
 
@@ -471,6 +514,19 @@ impl AirGenerator {
             Expr::Bool(_) => Some(AirType::Bool),
             Expr::String(_) => Some(AirType::Str),
             Expr::Ident(name) => self.variable_types.get(name).cloned(),
+            Expr::AddressOf(operand) => match operand.as_ref() {
+                Expr::Ident(name) => self.variable_types.get(name).cloned().map(|element_type| {
+                    AirType::Pointer {
+                        element_type: Box::new(element_type),
+                        permission: PointerPermission::Read,
+                    }
+                }),
+                _ => None,
+            },
+            Expr::Dereference(operand) => match self.infer_expr_type(operand) {
+                Some(AirType::Pointer { element_type, .. }) => Some(*element_type),
+                _ => None,
+            },
             Expr::Array(elements) => elements.first()
                 .and_then(|element| self.infer_expr_type(element))
                 .map(|element_type| AirType::Array {
@@ -518,6 +574,49 @@ impl AirGenerator {
             Expr::Bool(value) => AirValue::Bool(*value),
             Expr::String(value) => AirValue::String(value.clone()),
             Expr::Ident(name) => AirValue::Variable(name.clone()),
+
+            Expr::AddressOf(operand) => {
+                let variable = match operand.as_ref() {
+                    Expr::Ident(name) => name,
+                    _ => panic!("AIR ERR: 이번 단계에서는 변수에 대한 주소 취하기(&변수)만 지원합니다."),
+                };
+                let element_type = self.variable_types.get(variable).cloned()
+                    .unwrap_or_else(|| panic!("AIR ERR: 선언되지 않은 변수 '{}'의 주소를 가져올 수 없습니다.", variable));
+
+                let pointer_type = match expected {
+                    Some(ty @ AirType::Pointer { .. }) => ty.clone(),
+                    _ => AirType::Pointer {
+                        element_type: Box::new(element_type),
+                        permission: PointerPermission::Read,
+                    },
+                };
+
+                let destination = self.next_temp;
+                self.next_temp += 1;
+                self.instructions.push(AirInstruction::AddressOf {
+                    destination,
+                    variable: variable.clone(),
+                    pointer_type,
+                });
+                AirValue::Temporary(destination)
+            }
+
+            Expr::Dereference(operand) => {
+                let pointer_type = self.infer_expr_type(operand)
+                    .unwrap_or_else(|| panic!("AIR ERR: 역참조 대상의 포인터 타입을 추론할 수 없습니다."));
+                if !matches!(pointer_type, AirType::Pointer { .. }) {
+                    panic!("AIR ERR: 역참조 연산자 '*'에는 포인터가 필요합니다.");
+                }
+                let pointer = self.generate_expr_expected(operand, Some(&pointer_type));
+                let destination = self.next_temp;
+                self.next_temp += 1;
+                self.instructions.push(AirInstruction::PointerLoad {
+                    destination,
+                    pointer,
+                    pointer_type,
+                });
+                AirValue::Temporary(destination)
+            }
 
             Expr::Array(elements) => {
                 let expected_element_type = match expected {
@@ -695,6 +794,18 @@ impl AirPrinter {
                     "{prefix}%{destination} = {operator} {}",
                     Self::print_value(operand),
                 )
+            }
+
+            AirInstruction::AddressOf { destination, variable, .. } => {
+                format!("{prefix}%{destination} = address_of {variable}")
+            }
+
+            AirInstruction::PointerLoad { destination, pointer, .. } => {
+                format!("{prefix}%{destination} = load {}", Self::print_value(pointer))
+            }
+
+            AirInstruction::PointerStore { pointer, value, .. } => {
+                format!("{prefix}store {} -> {}", Self::print_value(value), Self::print_value(pointer))
             }
 
             AirInstruction::Logical {
@@ -921,6 +1032,14 @@ impl AirPrinter {
             AirType::Array { element_type, size } => {
                 format!("[{}; {}]", Self::type_name(element_type), size)
             }
+            AirType::Pointer { element_type, permission } => {
+                let permission = match permission {
+                    PointerPermission::Read => "r",
+                    PointerPermission::Write => "w",
+                    PointerPermission::ReadWrite => "rw",
+                };
+                format!("{} {}*", Self::type_name(element_type), permission)
+            }
         }
     }
 }
@@ -928,11 +1047,11 @@ impl AirPrinter {
 pub struct AirAnalyzer;
 
 impl AirAnalyzer {
-    // AirTypeChecker가 실제 의미/타입 검사를 수행한다.
-    // Analyzer는 이후 메모리/권한 분석이 추가될 자리를 유지하고,
-    // 현재는 각 함수가 검사 파이프라인을 통과했음을 표시한다.
-    pub fn analyze(program: &AirProgram) {
+    pub fn analyze(program: &AirProgram) -> Result<(), String> {
         for function in &program.functions {
+            Self::check_pointer_permissions(&function.instructions)
+                .map_err(|error| format!("함수 '{}': {}", function.name, error))?;
+
             println!(
                 "AIR ANALYZER: fn {}({} params) -> {:?}",
                 function.name,
@@ -941,6 +1060,51 @@ impl AirAnalyzer {
             );
         }
         println!("AIR ANALYZER: 완료");
+        Ok(())
+    }
+
+    fn check_pointer_permissions(instructions: &[AirInstruction]) -> Result<(), String> {
+        for instruction in instructions {
+            match instruction {
+                AirInstruction::PointerLoad { pointer_type, .. } => {
+                    match pointer_type {
+                        AirType::Pointer { permission: PointerPermission::Read | PointerPermission::ReadWrite, .. } => {}
+                        AirType::Pointer { permission: PointerPermission::Write, .. } => {
+                            return Err("AIR Permission ERR: w 포인터는 읽을 수 없습니다.".to_string());
+                        }
+                        _ => return Err("AIR Permission ERR: 역참조에는 포인터 타입이 필요합니다.".to_string()),
+                    }
+                }
+                AirInstruction::PointerStore { pointer_type, .. } => {
+                    match pointer_type {
+                        AirType::Pointer { permission: PointerPermission::Write | PointerPermission::ReadWrite, .. } => {}
+                        AirType::Pointer { permission: PointerPermission::Read, .. } => {
+                            return Err("AIR Permission ERR: r 포인터는 쓸 수 없습니다.".to_string());
+                        }
+                        _ => return Err("AIR Permission ERR: 역참조 대입에는 포인터 타입이 필요합니다.".to_string()),
+                    }
+                }
+                AirInstruction::If { then_body, else_body, .. } => {
+                    Self::check_pointer_permissions(then_body)?;
+                    if let Some(body) = else_body {
+                        Self::check_pointer_permissions(body)?;
+                    }
+                }
+                AirInstruction::While { condition_instructions, body, .. } => {
+                    Self::check_pointer_permissions(condition_instructions)?;
+                    Self::check_pointer_permissions(body)?;
+                }
+                AirInstruction::For { body, .. } => {
+                    Self::check_pointer_permissions(body)?;
+                }
+                AirInstruction::Logical { left_instructions, right_instructions, .. } => {
+                    Self::check_pointer_permissions(left_instructions)?;
+                    Self::check_pointer_permissions(right_instructions)?;
+                }
+                _ => {}
+            }
+        }
+        Ok(())
     }
 }
 
@@ -1166,6 +1330,64 @@ impl AirTypeChecker {
     ) -> Result<(), String> {
         for instruction in instructions {
             match instruction {
+                AirInstruction::AddressOf { destination, variable, pointer_type } => {
+                    let variable_type = variables.get(variable).ok_or_else(|| {
+                        format!("AIR Type ERR: 선언되지 않은 변수 '{}'의 주소를 가져올 수 없습니다.", variable)
+                    })?;
+                    match pointer_type {
+                        AirType::Pointer { element_type, .. } if element_type.as_ref() == variable_type => {
+                            temporaries.insert(*destination, pointer_type.clone());
+                        }
+                        AirType::Pointer { element_type, .. } => {
+                            return Err(format!(
+                                "AIR Type ERR: 주소 대상 타입이 포인터 타입과 다릅니다. 변수: {:?}, 포인터 대상: {:?}",
+                                variable_type, element_type
+                            ));
+                        }
+                        _ => return Err("AIR Type ERR: address_of 결과는 포인터 타입이어야 합니다.".to_string()),
+                    }
+                }
+
+                AirInstruction::PointerLoad { destination, pointer, pointer_type } => {
+                    let actual_pointer_type = Self::value_type(pointer, variables, temporaries)?;
+                    if &actual_pointer_type != pointer_type {
+                        return Err(format!(
+                            "AIR Type ERR: 역참조 포인터 타입이 일치하지 않습니다. 선언: {:?}, 실제: {:?}",
+                            pointer_type, actual_pointer_type
+                        ));
+                    }
+                    match pointer_type {
+                        AirType::Pointer { element_type, .. } => {
+                            temporaries.insert(*destination, element_type.as_ref().clone());
+                        }
+                        _ => return Err("AIR Type ERR: 역참조에는 포인터 타입이 필요합니다.".to_string()),
+                    }
+                }
+
+                AirInstruction::PointerStore { pointer, value, pointer_type } => {
+                    let actual_pointer_type = Self::value_type(pointer, variables, temporaries)?;
+                    if &actual_pointer_type != pointer_type {
+                        return Err(format!(
+                            "AIR Type ERR: 대입 대상 포인터 타입이 일치하지 않습니다. 선언: {:?}, 실제: {:?}",
+                            pointer_type, actual_pointer_type
+                        ));
+                    }
+                    match pointer_type {
+                        AirType::Pointer { element_type, .. } => {
+                            let actual_value_type = Self::value_type_in_context(
+                                value, element_type.as_ref(), variables, temporaries
+                            )?;
+                            if actual_value_type != element_type.as_ref().clone() {
+                                return Err(format!(
+                                    "AIR Type ERR: 포인터 대상에 대입하는 값의 타입이 다릅니다. 기대: {:?}, 실제: {:?}",
+                                    element_type, actual_value_type
+                                ));
+                            }
+                        }
+                        _ => return Err("AIR Type ERR: 역참조 대입에는 포인터 타입이 필요합니다.".to_string()),
+                    }
+                }
+
                 AirInstruction::Binary { destination, operator, left, right } => {
                     let (left_type, right_type) = Self::compatible_binary_types(left, right, variables, temporaries)?;
                     let result_type = match operator {

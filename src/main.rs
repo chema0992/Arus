@@ -58,7 +58,10 @@ fn main() {
         std::process::exit(1);
     }
 
-    AirAnalyzer::analyze(&air);
+    if let Err(error) = AirAnalyzer::analyze(&air) {
+        eprintln!("{error}");
+        std::process::exit(1);
+    }
 
     let llvm_ir = LlvmGenerator::generate(&air);
 

@@ -20,6 +20,25 @@ impl Parser {
 
         Stmt::Assign { name, value }
     }
+
+    fn parse_deref_assignment(&mut self) -> Stmt {
+        self.advance(); // *
+
+        let pointer = self.parse_unary();
+
+        match self.advance() {
+            Token::Equal => {}
+            _ => panic!("Parser ERR: 역참조 대입에는 '='가 필요합니다."),
+        }
+
+        let value = self.parse_expression();
+
+        Stmt::AssignDeref {
+            pointer,
+            value,
+        }
+    }
+
     pub fn new(tokens: Vec<Token>) -> Self {
         Self { tokens, position: 0 }
     }
@@ -155,10 +174,22 @@ impl Parser {
     }
 
     fn parse_statement(&mut self) -> Stmt {
+        if self.peek() == &Token::Star
+            && matches!(
+                self.tokens.get(self.position + 1),
+                Some(Token::Ident(_))
+            )
+            && self.tokens.get(self.position + 2) == Some(&Token::Equal)
+        {
+            return self.parse_deref_assignment();
+        }
         if matches!(self.peek(), Token::Ident(_))
             && self.tokens.get(self.position + 1) == Some(&Token::Equal)
         {
             return self.parse_assignment();
+        }
+        if *self.peek() == Token::Star {
+            return self.parse_deref_assignment();
         }
         match self.peek() {
             Token::Let => self.parse_let(false),
@@ -345,7 +376,7 @@ impl Parser {
     }
 
     fn parse_type(&mut self) -> Type {
-        match self.advance() {
+        let base_type = match self.advance() {
             Token::LeftBracket => {
                 let element_type = self.parse_type();
 
@@ -359,7 +390,6 @@ impl Parser {
                         if value < 0 {
                             panic!("Parser ERR: 배열 크기는 음수일 수 없습니다.");
                         }
-
                         value as usize
                     }
                     _ => panic!("Parser ERR: 배열 크기는 정수여야 합니다."),
@@ -385,6 +415,27 @@ impl Parser {
             Token::Ident(name) if name == "bool" => Type::Bool,
             Token::Ident(name) => Type::Named(name),
             _ => panic!("Parser ERR: 타입이 필요합니다."),
+        };
+
+        // 포인터 타입 표기: i32 r*, i32 w*, i32 rw*
+        let permission = match self.peek() {
+            Token::Ident(name) if name == "r" => Some(PointerPermission::Read),
+            Token::Ident(name) if name == "w" => Some(PointerPermission::Write),
+            Token::Ident(name) if name == "rw" => Some(PointerPermission::ReadWrite),
+            _ => None,
+        };
+
+        if let Some(permission) = permission {
+            self.advance(); // r / w / rw
+            match self.advance() {
+                Token::Star => Type::Pointer {
+                    element_type: Box::new(base_type),
+                    permission,
+                },
+                _ => panic!("Parser ERR: 포인터 권한 뒤에는 '*'가 필요합니다."),
+            }
+        } else {
+            base_type
         }
     }
 
@@ -536,41 +587,73 @@ impl Parser {
 
     fn parse_additive(&mut self) -> Expr {
         let mut expr = self.parse_term();
-        loop {
-            let operator = match self.peek() {
-                Token::Plus => BinaryOp::Add,
-                Token::Minus => BinaryOp::Sub,
-                _ => break,
-            };
-            self.advance();
-            let right = self.parse_term();
-            expr = Expr::Binary { left: Box::new(expr), operator, right: Box::new(right) };
+            loop {
+                let operator = match self.peek() {
+                    Token::Plus => BinaryOp::Add,
+                    Token::Minus => BinaryOp::Sub,
+                    _ => break,
+                };
+                self.advance();
+                let right = self.parse_term();
+                expr = Expr::Binary { left: Box::new(expr), operator, right: Box::new(right) };
+            }
+            expr
         }
-        expr
-    }
 
     fn parse_term(&mut self) -> Expr {
         let mut expr = self.parse_unary();
+
         loop {
+            // 다음 문장이 *p = value 형태인지 확인
+            let is_deref_assignment =
+                self.peek() == &Token::Star
+                && matches!(
+                    self.tokens.get(self.position + 1),
+                    Some(Token::Ident(_))
+                )
+                && self.tokens.get(self.position + 2) == Some(&Token::Equal);
+
+            // 다음 문장의 시작이면 현재 식의 파싱을 종료
+            if is_deref_assignment {
+                break;
+            }
+
             let operator = match self.peek() {
                 Token::Star => BinaryOp::Mul,
                 Token::Slash => BinaryOp::Div,
                 _ => break,
             };
+
             self.advance();
             let right = self.parse_unary();
-            expr = Expr::Binary { left: Box::new(expr), operator, right: Box::new(right) };
+
+            expr = Expr::Binary {
+                left: Box::new(expr),
+                operator,
+                right: Box::new(right),
+            };
         }
+
         expr
     }
 
     fn parse_unary(&mut self) -> Expr {
-        if *self.peek() == Token::Bang {
-            self.advance();
-            let operand = self.parse_unary();
-            return Expr::Unary { operator: UnaryOp::Not, operand: Box::new(operand) };
+        match self.peek() {
+            Token::Bang => {
+                self.advance();
+                let operand = self.parse_unary();
+                Expr::Unary { operator: UnaryOp::Not, operand: Box::new(operand) }
+            }
+            Token::Ampersand => {
+                self.advance();
+                Expr::AddressOf(Box::new(self.parse_unary()))
+            }
+            Token::Star => {
+                self.advance();
+                Expr::Dereference(Box::new(self.parse_unary()))
+            }
+            _ => self.parse_factor(),
         }
-        self.parse_factor()
     }
 
     fn parse_factor(&mut self) -> Expr {

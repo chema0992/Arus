@@ -1,6 +1,6 @@
 
 use crate::air::*;
-use std::collections::HashMap;
+use std::collections::{HashMap, HashSet};
 
 #[derive(Clone)]
 struct GeneratedValue {
@@ -150,7 +150,7 @@ impl LlvmGenerator {
                     self.store_array_elements(&element_ptr, element_type, nested_elements, nested_id);
                 } else {
                     let generated = self.value(element);
-                    if generated.ty != *element_type {
+                    if &generated.ty != element_type {
                         panic!("LLVM ERR: 중첩 배열 원소 타입이 선언과 다릅니다.");
                     }
                     self.output.push_str(&format!(
@@ -175,52 +175,98 @@ impl LlvmGenerator {
         }
     }
 
+    fn collect_addressed_variables(
+        instructions: &[AirInstruction],
+        addressed: &mut HashSet<String>,
+    ) {
+        for instruction in instructions {
+            match instruction {
+                AirInstruction::AddressOf { variable, .. } => {
+                    addressed.insert(variable.clone());
+                }
+                AirInstruction::If { then_body, else_body, .. } => {
+                    Self::collect_addressed_variables(then_body, addressed);
+                    if let Some(body) = else_body {
+                        Self::collect_addressed_variables(body, addressed);
+                    }
+                }
+                AirInstruction::While { condition_instructions, body, .. } => {
+                    Self::collect_addressed_variables(condition_instructions, addressed);
+                    Self::collect_addressed_variables(body, addressed);
+                }
+                AirInstruction::For { body, .. } => {
+                    Self::collect_addressed_variables(body, addressed);
+                }
+                AirInstruction::Logical { left_instructions, right_instructions, .. } => {
+                    Self::collect_addressed_variables(left_instructions, addressed);
+                    Self::collect_addressed_variables(right_instructions, addressed);
+                }
+                _ => {}
+            }
+        }
+    }
+
     fn collect_mutable_slots(
         instructions: &[AirInstruction],
+        addressed: &HashSet<String>,
         slot_by_instruction: &mut HashMap<usize, String>,
         allocas: &mut Vec<String>,
         next_slot: &mut u32,
     ) {
         for instruction in instructions {
-            let needs_slot = matches!(instruction, AirInstruction::For { .. })
-                || matches!(instruction, AirInstruction::Let { mutable: true, .. });
+            let needs_slot = match instruction {
+                AirInstruction::For { .. } => true,
+                AirInstruction::Let { name, mutable, .. } => *mutable || addressed.contains(name),
+                _ => false,
+            };
             if needs_slot {
                 let key = instruction as *const AirInstruction as usize;
                 let slot = format!("%slot{}", *next_slot);
                 *next_slot += 1;
                 slot_by_instruction.insert(key, slot.clone());
-                // Scalar variables keep the existing roomy slot. Fixed arrays need their
-                // exact aggregate type because elements are addressed with GEP.
                 let declared_type = match instruction {
                     AirInstruction::Let { ty, value, .. } => {
                         ty.clone().or_else(|| Self::infer_value_type(value))
                     }
                     _ => None,
                 };
-                let slot_type = match declared_type.as_ref() {
-                    Some(array_type @ AirType::Array { .. }) => Self::llvm_type(array_type),
-                    _ => "i64".to_string(),
+                // Address-taken locals use their declared pointee type. Existing
+                // mutable scalar slots keep the previous roomy i64 allocation.
+                let address_taken = match instruction {
+                    AirInstruction::Let { name, .. } => addressed.contains(name),
+                    _ => false,
+                };
+                let slot_type = if address_taken {
+                    declared_type
+                        .as_ref()
+                        .map(Self::llvm_type)
+                        .unwrap_or_else(|| "i64".to_string())
+                } else {
+                    match declared_type.as_ref() {
+                        Some(array_type @ AirType::Array { .. }) => Self::llvm_type(array_type),
+                        _ => "i64".to_string(),
+                    }
                 };
                 allocas.push(format!("    {slot} = alloca {slot_type}, align 8\n"));
             }
 
             match instruction {
                 AirInstruction::If { then_body, else_body, .. } => {
-                    Self::collect_mutable_slots(then_body, slot_by_instruction, allocas, next_slot);
+                    Self::collect_mutable_slots(then_body, addressed, slot_by_instruction, allocas, next_slot);
                     if let Some(else_body) = else_body {
-                        Self::collect_mutable_slots(else_body, slot_by_instruction, allocas, next_slot);
+                        Self::collect_mutable_slots(else_body, addressed, slot_by_instruction, allocas, next_slot);
                     }
                 }
                 AirInstruction::While { condition_instructions, body, .. } => {
-                    Self::collect_mutable_slots(condition_instructions, slot_by_instruction, allocas, next_slot);
-                    Self::collect_mutable_slots(body, slot_by_instruction, allocas, next_slot);
+                    Self::collect_mutable_slots(condition_instructions, addressed, slot_by_instruction, allocas, next_slot);
+                    Self::collect_mutable_slots(body, addressed, slot_by_instruction, allocas, next_slot);
                 }
                 AirInstruction::For { body, .. } => {
-                    Self::collect_mutable_slots(body, slot_by_instruction, allocas, next_slot);
+                    Self::collect_mutable_slots(body, addressed, slot_by_instruction, allocas, next_slot);
                 }
                 AirInstruction::Logical { left_instructions, right_instructions, .. } => {
-                    Self::collect_mutable_slots(left_instructions, slot_by_instruction, allocas, next_slot);
-                    Self::collect_mutable_slots(right_instructions, slot_by_instruction, allocas, next_slot);
+                    Self::collect_mutable_slots(left_instructions, addressed, slot_by_instruction, allocas, next_slot);
+                    Self::collect_mutable_slots(right_instructions, addressed, slot_by_instruction, allocas, next_slot);
                 }
                 _ => {}
             }
@@ -254,9 +300,13 @@ impl LlvmGenerator {
         self.current_terminated = false;
         self.current_return_type = function.return_type.clone();
 
+        let mut addressed_variables = HashSet::new();
+        Self::collect_addressed_variables(&function.instructions, &mut addressed_variables);
+
         let mut allocas = Vec::new();
         Self::collect_mutable_slots(
             &function.instructions,
+            &addressed_variables,
             &mut self.slot_by_instruction,
             &mut allocas,
             &mut self.next_slot,
@@ -301,6 +351,7 @@ impl LlvmGenerator {
                 AirType::Str => ("ptr", "null"),
                 AirType::Void => ("void", ""),
                 AirType::Array { .. } => panic!("LLVM ERR: 배열 반환형은 아직 지원하지 않습니다."),
+                AirType::Pointer { .. } => ("ptr", "null"),
                 AirType::Named(name) => panic!("LLVM ERR: 지원하지 않는 반환 타입: {name}"),
             };
             if function.return_type == AirType::Void {
@@ -434,6 +485,61 @@ impl LlvmGenerator {
                 }
             }
 
+            AirInstruction::AddressOf { destination, variable, pointer_type } => {
+                let slot = self.active_mutable_slots.get(variable).cloned().unwrap_or_else(|| {
+                    panic!("LLVM ERR: 주소를 가져올 변수 '{}'의 저장 공간이 없습니다.", variable)
+                });
+                let element_type = match pointer_type {
+                    AirType::Pointer { element_type, .. } => element_type.as_ref(),
+                    _ => panic!("LLVM ERR: address_of 결과 타입이 포인터가 아닙니다."),
+                };
+                let llvm_element_type = Self::llvm_type(element_type);
+                self.output.push_str(&format!(
+                    "    %t{destination} = getelementptr inbounds {llvm_element_type}, ptr {slot}, i32 0\n"
+                ));
+                self.temporary_types.insert(*destination, pointer_type.clone());
+            }
+
+            AirInstruction::PointerLoad { destination, pointer, pointer_type } => {
+                let pointer_value = self.value(pointer);
+                if &pointer_value.ty != pointer_type {
+                    panic!("LLVM ERR: 역참조 포인터 타입이 일치하지 않습니다.");
+                }
+                let element_type = match pointer_type {
+                    AirType::Pointer { element_type, .. } => element_type.as_ref(),
+                    _ => panic!("LLVM ERR: load 대상이 포인터가 아닙니다."),
+                };
+                let llvm_element_type = Self::llvm_type(element_type);
+                self.output.push_str(&format!(
+                    "    %t{destination} = load {llvm_element_type}, ptr {}\n",
+                    pointer_value.operand
+                ));
+                self.temporary_types.insert(*destination, (*element_type).clone());
+            }
+
+            AirInstruction::PointerStore { pointer, value, pointer_type } => {
+                let pointer_value = self.value(pointer);
+                if &pointer_value.ty != pointer_type {
+                    panic!("LLVM ERR: store 대상 포인터 타입이 일치하지 않습니다.");
+                }
+                let element_type = match pointer_type {
+                    AirType::Pointer { element_type, .. } => element_type.as_ref(),
+                    _ => panic!("LLVM ERR: store 대상이 포인터가 아닙니다."),
+                };
+                let mut generated = self.value(value);
+                if matches!(value, AirValue::Integer(_)) && Self::is_integer_type(element_type) {
+                    generated.ty = element_type.clone();
+                }
+                if generated.ty != *element_type {
+                    panic!("LLVM ERR: 포인터에 대입하는 값의 타입이 다릅니다.");
+                }
+                let llvm_element_type = Self::llvm_type(element_type);
+                self.output.push_str(&format!(
+                    "    store {llvm_element_type} {}, ptr {}\n",
+                    generated.operand, pointer_value.operand
+                ));
+            }
+
             AirInstruction::Logical {
                 destination,
                 operator,
@@ -468,8 +574,8 @@ impl LlvmGenerator {
                 if let AirType::Array { .. } = &declared_type {
                     let array_id = self.next_array;
                     self.next_array += 1;
-                    let slot = if *mutable {
-                        let key = instruction as *const AirInstruction as usize;
+                    let key = instruction as *const AirInstruction as usize;
+                    let slot = if *mutable || self.slot_by_instruction.contains_key(&key) {
                         self.slot_by_instruction.get(&key).cloned().unwrap_or_else(|| {
                             panic!("LLVM ERR: 배열 변수 '{}'의 저장 공간이 없습니다.", name)
                         })
@@ -498,7 +604,7 @@ impl LlvmGenerator {
                         ));
                     }
 
-                    if *mutable {
+                    if *mutable || self.slot_by_instruction.contains_key(&key) {
                         self.variables.remove(name);
                         self.active_mutable_slots.insert(name.clone(), slot);
                         self.mutable_types.insert(name.clone(), declared_type);
@@ -522,10 +628,10 @@ impl LlvmGenerator {
                         );
                     }
 
-                    if *mutable {
-                        let key = instruction as *const AirInstruction as usize;
+                    let key = instruction as *const AirInstruction as usize;
+                    if *mutable || self.slot_by_instruction.contains_key(&key) {
                         let slot = self.slot_by_instruction.get(&key).cloned().unwrap_or_else(|| {
-                            panic!("LLVM ERR: 가변 변수 '{}'의 저장 공간이 없습니다.", name)
+                            panic!("LLVM ERR: 변수 '{}'의 저장 공간이 없습니다.", name)
                         });
                         self.variables.remove(name);
                         self.active_mutable_slots.insert(name.clone(), slot.clone());
@@ -644,6 +750,7 @@ impl LlvmGenerator {
                         AirType::Bool => ("ptr", self.bool_string_pointer(&value.operand)),
                         AirType::Array { .. } => panic!("LLVM ERR: 배열 전체를 print/println으로 출력할 수 없습니다."),
                         AirType::Void => panic!("LLVM ERR: void 값은 출력할 수 없습니다."),
+                        AirType::Pointer { .. } => panic!("LLVM ERR: 포인터 자체는 출력할 수 없습니다."),
                         AirType::Named(name) => panic!("LLVM ERR: 출력할 수 없는 타입입니다: {name}"),
                     };
 
@@ -1143,6 +1250,7 @@ impl LlvmGenerator {
             AirType::Array { element_type, size } => {
                 format!("[{} x {}]", size, Self::llvm_type(element_type))
             }
+            AirType::Pointer { .. } => "ptr".to_string(),
             AirType::Named(name) => panic!("LLVM ERR: 지원하지 않는 타입: {name}"),
         }
     }
