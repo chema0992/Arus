@@ -1,0 +1,13 @@
+module {
+    fn main() -> i32 {
+        let value: i32 = 10
+        %1 = address_of value
+        let p: i32 rw* = %1
+        %2 = address_of value
+        let p2: i32 r* = %2
+        store 50 -> p
+        %3 = load p
+        call println(%3)
+        return 0
+    }
+}
