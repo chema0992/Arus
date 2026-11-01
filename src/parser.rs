@@ -22,8 +22,12 @@ impl Parser {
     }
 
     fn parse_deref_assignment(&mut self) -> Stmt {
-        self.advance(); // *
+        match self.advance() {
+            Token::Star => {}
+            _ => unreachable!(),
+        }
 
+        // '*p = value'에서 p에 해당하는 포인터 식을 파싱한다.
         let pointer = self.parse_unary();
 
         match self.advance() {
@@ -32,13 +36,8 @@ impl Parser {
         }
 
         let value = self.parse_expression();
-
-        Stmt::AssignDeref {
-            pointer,
-            value,
-        }
+        Stmt::AssignDeref { pointer, value }
     }
-
     pub fn new(tokens: Vec<Token>) -> Self {
         Self { tokens, position: 0 }
     }
@@ -174,15 +173,6 @@ impl Parser {
     }
 
     fn parse_statement(&mut self) -> Stmt {
-        if self.peek() == &Token::Star
-            && matches!(
-                self.tokens.get(self.position + 1),
-                Some(Token::Ident(_))
-            )
-            && self.tokens.get(self.position + 2) == Some(&Token::Equal)
-        {
-            return self.parse_deref_assignment();
-        }
         if matches!(self.peek(), Token::Ident(_))
             && self.tokens.get(self.position + 1) == Some(&Token::Equal)
         {
@@ -587,33 +577,34 @@ impl Parser {
 
     fn parse_additive(&mut self) -> Expr {
         let mut expr = self.parse_term();
-            loop {
-                let operator = match self.peek() {
-                    Token::Plus => BinaryOp::Add,
-                    Token::Minus => BinaryOp::Sub,
-                    _ => break,
-                };
-                self.advance();
-                let right = self.parse_term();
-                expr = Expr::Binary { left: Box::new(expr), operator, right: Box::new(right) };
-            }
-            expr
+        loop {
+            let operator = match self.peek() {
+                Token::Plus => BinaryOp::Add,
+                Token::Minus => BinaryOp::Sub,
+                _ => break,
+            };
+            self.advance();
+            let right = self.parse_term();
+            expr = Expr::Binary { left: Box::new(expr), operator, right: Box::new(right) };
         }
+        expr
+    }
 
     fn parse_term(&mut self) -> Expr {
         let mut expr = self.parse_unary();
 
         loop {
-            // 다음 문장이 *p = value 형태인지 확인
+            // 다음 토큰이 '*p =' 형태라면
+            // 새로운 역참조 대입 문장이므로 여기서 멈춘다.
             let is_deref_assignment =
-                self.peek() == &Token::Star
+                matches!(self.peek(), Token::Star)
                 && matches!(
                     self.tokens.get(self.position + 1),
                     Some(Token::Ident(_))
                 )
-                && self.tokens.get(self.position + 2) == Some(&Token::Equal);
+                && self.tokens.get(self.position + 2)
+                    == Some(&Token::Equal);
 
-            // 다음 문장의 시작이면 현재 식의 파싱을 종료
             if is_deref_assignment {
                 break;
             }

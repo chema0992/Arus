@@ -1044,13 +1044,145 @@ impl AirPrinter {
     }
 }
 
+#[derive(Debug, Clone, PartialEq, Eq)]
+struct BorrowRecord {
+    target: String,
+    permission: PointerPermission,
+}
+
+#[derive(Debug, Default)]
+struct BorrowScope {
+    // 이 스코프에서 선언된 포인터 변수와 그 포인터가 유지하는 대여
+    pointers: HashMap<String, BorrowRecord>,
+    // 이 스코프 안에서 만들어진 AddressOf 임시값
+    temporary_ids: Vec<u32>,
+}
+
+#[derive(Debug, Default)]
+struct BorrowState {
+    scopes: Vec<BorrowScope>,
+    temporary_borrows: HashMap<u32, BorrowRecord>,
+}
+
+impl BorrowState {
+    fn push_scope(&mut self) {
+        self.scopes.push(BorrowScope::default());
+    }
+
+    fn pop_scope(&mut self) {
+        if let Some(scope) = self.scopes.pop() {
+            // 포인터 변수들이 스코프에서 사라지므로 해당 대여도 함께 해제된다.
+            for id in scope.temporary_ids {
+                self.temporary_borrows.remove(&id);
+            }
+        }
+    }
+
+    fn register_temporary(&mut self, id: u32, record: BorrowRecord) {
+        if let Some(scope) = self.scopes.last_mut() {
+            scope.temporary_ids.push(id);
+        }
+        self.temporary_borrows.insert(id, record);
+    }
+
+    fn take_temporary(&mut self, id: u32) -> Option<BorrowRecord> {
+        self.temporary_borrows.remove(&id)
+    }
+
+    fn lookup_pointer(&self, name: &str) -> Option<&BorrowRecord> {
+        self.scopes
+            .iter()
+            .rev()
+            .find_map(|scope| scope.pointers.get(name))
+    }
+
+    fn bind_pointer(&mut self, name: String, record: BorrowRecord) {
+        if let Some(scope) = self.scopes.last_mut() {
+            scope.pointers.insert(name, record);
+        }
+    }
+
+    fn pointer_scope_index(&self, name: &str) -> Option<usize> {
+        self.scopes
+            .iter()
+            .rposition(|scope| scope.pointers.contains_key(name))
+    }
+
+    fn remove_pointer_at(&mut self, scope_index: usize, name: &str) {
+        self.scopes[scope_index].pointers.remove(name);
+    }
+
+    fn bind_pointer_at(
+        &mut self,
+        scope_index: usize,
+        name: String,
+        record: BorrowRecord,
+    ) {
+        self.scopes[scope_index].pointers.insert(name, record);
+    }
+
+    fn check_new_borrow(
+        &self,
+        target: &str,
+        permission: PointerPermission,
+    ) -> Result<(), String> {
+        let active: Vec<PointerPermission> = self
+            .scopes
+            .iter()
+            .flat_map(|scope| scope.pointers.values())
+            .chain(self.temporary_borrows.values())
+            .filter(|record| record.target == target)
+            .map(|record| record.permission)
+            .collect();
+
+        // r은 기존 대여가 전부 r일 때만 공유할 수 있다.
+        // w와 rw는 기존 대여가 하나도 없을 때만 허용한다.
+        let conflict = match permission {
+            PointerPermission::Read => active
+                .iter()
+                .any(|active_permission| *active_permission != PointerPermission::Read),
+            PointerPermission::Write | PointerPermission::ReadWrite => !active.is_empty(),
+        };
+
+        if conflict {
+            let active_text = active
+                .iter()
+                .map(|permission| Self::permission_name(*permission))
+                .collect::<Vec<_>>()
+                .join(", ");
+
+            return Err(format!(
+                "AIR Borrow ERR: '{}'에 대한 {} 포인터 대여가 충돌합니다. 현재 대여: {}",
+                target,
+                Self::permission_name(permission),
+                active_text,
+            ));
+        }
+
+        Ok(())
+    }
+
+    fn permission_name(permission: PointerPermission) -> &'static str {
+        match permission {
+            PointerPermission::Read => "r",
+            PointerPermission::Write => "w",
+            PointerPermission::ReadWrite => "rw",
+        }
+    }
+}
+
 pub struct AirAnalyzer;
 
 impl AirAnalyzer {
     pub fn analyze(program: &AirProgram) -> Result<(), String> {
         for function in &program.functions {
-            Self::check_pointer_permissions(&function.instructions)
-                .map_err(|error| format!("함수 '{}': {}", function.name, error))?;
+            let mut state = BorrowState::default();
+            state.push_scope();
+
+            let result = Self::analyze_instructions(&function.instructions, &mut state);
+            state.pop_scope();
+
+            result.map_err(|error| format!("함수 '{}': {}", function.name, error))?;
 
             println!(
                 "AIR ANALYZER: fn {}({} params) -> {:?}",
@@ -1059,51 +1191,253 @@ impl AirAnalyzer {
                 function.return_type
             );
         }
+
         println!("AIR ANALYZER: 완료");
         Ok(())
     }
 
-    fn check_pointer_permissions(instructions: &[AirInstruction]) -> Result<(), String> {
-        for instruction in instructions {
-            match instruction {
-                AirInstruction::PointerLoad { pointer_type, .. } => {
-                    match pointer_type {
-                        AirType::Pointer { permission: PointerPermission::Read | PointerPermission::ReadWrite, .. } => {}
-                        AirType::Pointer { permission: PointerPermission::Write, .. } => {
-                            return Err("AIR Permission ERR: w 포인터는 읽을 수 없습니다.".to_string());
-                        }
-                        _ => return Err("AIR Permission ERR: 역참조에는 포인터 타입이 필요합니다.".to_string()),
-                    }
-                }
-                AirInstruction::PointerStore { pointer_type, .. } => {
-                    match pointer_type {
-                        AirType::Pointer { permission: PointerPermission::Write | PointerPermission::ReadWrite, .. } => {}
-                        AirType::Pointer { permission: PointerPermission::Read, .. } => {
-                            return Err("AIR Permission ERR: r 포인터는 쓸 수 없습니다.".to_string());
-                        }
-                        _ => return Err("AIR Permission ERR: 역참조 대입에는 포인터 타입이 필요합니다.".to_string()),
-                    }
-                }
-                AirInstruction::If { then_body, else_body, .. } => {
-                    Self::check_pointer_permissions(then_body)?;
-                    if let Some(body) = else_body {
-                        Self::check_pointer_permissions(body)?;
-                    }
-                }
-                AirInstruction::While { condition_instructions, body, .. } => {
-                    Self::check_pointer_permissions(condition_instructions)?;
-                    Self::check_pointer_permissions(body)?;
-                }
-                AirInstruction::For { body, .. } => {
-                    Self::check_pointer_permissions(body)?;
-                }
-                AirInstruction::Logical { left_instructions, right_instructions, .. } => {
-                    Self::check_pointer_permissions(left_instructions)?;
-                    Self::check_pointer_permissions(right_instructions)?;
-                }
-                _ => {}
+    // 중첩 블록은 독립적인 lexical scope로 분석한다.
+    // 바깥 스코프의 대여는 유지하고, 안쪽 스코프의 대여만 종료 시 해제한다.
+    fn analyze_scoped(
+        instructions: &[AirInstruction],
+        state: &mut BorrowState,
+    ) -> Result<(), String> {
+        let outer_bindings: Vec<HashMap<String, BorrowRecord>> = state
+            .scopes
+            .iter()
+            .map(|scope| scope.pointers.clone())
+            .collect();
+
+        state.push_scope();
+        let result = Self::analyze_instructions(instructions, state);
+        state.pop_scope();
+
+        result?;
+
+        // 분기/반복문 안에서 바깥 포인터를 재대입하면 실행 경로에 따라
+        // 실제 대상이 달라진다. 현재 MVP 분석기는 이를 병합하지 않으므로
+        // 잘못된 대여 판정을 피하기 위해 해당 동작을 명시적으로 거부한다.
+        let outer_bindings_changed = state
+            .scopes
+            .iter()
+            .zip(outer_bindings.iter())
+            .any(|(scope, before)| scope.pointers != *before);
+
+        if outer_bindings_changed {
+            return Err(
+                "AIR Borrow ERR: 중첩 스코프에서 바깥 포인터를 재대입하는 기능은 아직 지원되지 않습니다."
+                    .to_string(),
+            );
+        }
+
+        Ok(())
+    }
+
+    fn consume_temporary_borrow(
+        value: &AirValue,
+        state: &mut BorrowState,
+    ) -> Result<(), String> {
+        if let AirValue::Temporary(id) = value {
+            if let Some(record) = state.take_temporary(*id) {
+                // &value를 한 번만 사용하는 식에서는 해당 식이 끝날 때 대여가 끝난다.
+                state.check_new_borrow(&record.target, record.permission)?;
             }
         }
+        Ok(())
+    }
+
+    fn analyze_instructions(
+        instructions: &[AirInstruction],
+        state: &mut BorrowState,
+    ) -> Result<(), String> {
+        for instruction in instructions {
+            match instruction {
+                AirInstruction::AddressOf {
+                    destination,
+                    variable,
+                    pointer_type,
+                } => {
+                    let permission = match pointer_type {
+                        AirType::Pointer { permission, .. } => *permission,
+                        _ => {
+                            return Err(
+                                "AIR Borrow ERR: address_of 결과는 포인터 타입이어야 합니다."
+                                    .to_string(),
+                            );
+                        }
+                    };
+
+                    // 실제 대여 검사는 이 임시값이 포인터 변수에 저장되거나
+                    // 한 번만 사용하는 역참조 식에서 소비될 때 수행한다.
+                    state.register_temporary(
+                        *destination,
+                        BorrowRecord {
+                            target: variable.clone(),
+                            permission,
+                        },
+                    );
+                }
+
+                AirInstruction::Let { name, value, .. } => {
+                    match value {
+                        AirValue::Temporary(id) => {
+                            if let Some(record) = state.take_temporary(*id) {
+                                state.check_new_borrow(&record.target, record.permission)?;
+                                state.bind_pointer(name.clone(), record);
+                            }
+                        }
+                        AirValue::Variable(source) => {
+                            if let Some(record) = state.lookup_pointer(source).cloned() {
+                                // r 포인터는 복수 참조가 가능하다.
+                                // w/rw 포인터를 복제하면 독점성이 깨지므로 거부한다.
+                                state.check_new_borrow(&record.target, record.permission)?;
+                                state.bind_pointer(name.clone(), record);
+                            }
+                        }
+                        _ => {}
+                    }
+                }
+
+                AirInstruction::Assign { name, value } => {
+                    // 포인터 변수의 재대입은 기존 대여를 먼저 끝낸 뒤 새 대여를 시작한다.
+                    // 같은 포인터 변수에 자기 자신을 대입하는 경우는 상태를 바꾸지 않는다.
+                    if matches!(value, AirValue::Variable(source) if source == name) {
+                        continue;
+                    }
+
+                    if let Some(scope_index) = state.pointer_scope_index(name) {
+                        // 재대입된 포인터의 수명은 재대입이 일어난 블록이 아니라
+                        // 원래 포인터 변수가 선언된 스코프를 그대로 따른다.
+                        state.remove_pointer_at(scope_index, name);
+
+                        let new_record = match value {
+                            AirValue::Temporary(id) => state.take_temporary(*id),
+                            AirValue::Variable(source) => {
+                                state.lookup_pointer(source).cloned()
+                            }
+                            _ => None,
+                        };
+
+                        if let Some(record) = new_record {
+                            state.check_new_borrow(&record.target, record.permission)?;
+                            state.bind_pointer_at(scope_index, name.clone(), record);
+                        }
+                    }
+                }
+
+                AirInstruction::PointerLoad {
+                    pointer,
+                    pointer_type,
+                    ..
+                } => {
+                    match pointer_type {
+                        AirType::Pointer {
+                            permission: PointerPermission::Read | PointerPermission::ReadWrite,
+                            ..
+                        } => {}
+                        AirType::Pointer {
+                            permission: PointerPermission::Write,
+                            ..
+                        } => {
+                            return Err(
+                                "AIR Permission ERR: w 포인터는 읽을 수 없습니다.".to_string(),
+                            );
+                        }
+                        _ => {
+                            return Err(
+                                "AIR Permission ERR: 역참조에는 포인터 타입이 필요합니다."
+                                    .to_string(),
+                            );
+                        }
+                    }
+
+                    Self::consume_temporary_borrow(pointer, state)?;
+                }
+
+                AirInstruction::PointerStore {
+                    pointer,
+                    pointer_type,
+                    ..
+                } => {
+                    match pointer_type {
+                        AirType::Pointer {
+                            permission: PointerPermission::Write | PointerPermission::ReadWrite,
+                            ..
+                        } => {}
+                        AirType::Pointer {
+                            permission: PointerPermission::Read,
+                            ..
+                        } => {
+                            return Err(
+                                "AIR Permission ERR: r 포인터는 쓸 수 없습니다.".to_string(),
+                            );
+                        }
+                        _ => {
+                            return Err(
+                                "AIR Permission ERR: 역참조 대입에는 포인터 타입이 필요합니다."
+                                    .to_string(),
+                            );
+                        }
+                    }
+
+                    Self::consume_temporary_borrow(pointer, state)?;
+                }
+
+                AirInstruction::Binary { left, right, .. } => {
+                    Self::consume_temporary_borrow(left, state)?;
+                    Self::consume_temporary_borrow(right, state)?;
+                }
+
+                AirInstruction::Unary { operand, .. } => {
+                    Self::consume_temporary_borrow(operand, state)?;
+                }
+
+                AirInstruction::Call { args, .. } => {
+                    for argument in args {
+                        Self::consume_temporary_borrow(argument, state)?;
+                    }
+                }
+
+                AirInstruction::Return { value } => {
+                    Self::consume_temporary_borrow(value, state)?;
+                }
+
+                AirInstruction::If {
+                    then_body,
+                    else_body,
+                    ..
+                } => {
+                    Self::analyze_scoped(then_body, state)?;
+                    if let Some(body) = else_body {
+                        Self::analyze_scoped(body, state)?;
+                    }
+                }
+
+                AirInstruction::While {
+                    condition_instructions,
+                    body,
+                    ..
+                } => {
+                    // 조건식 임시값은 조건식 평가가 끝나면 해제한다.
+                    Self::analyze_scoped(condition_instructions, state)?;
+                    Self::analyze_scoped(body, state)?;
+                }
+
+                AirInstruction::For { body, .. } => {
+                    Self::analyze_scoped(body, state)?;
+                }
+
+                AirInstruction::Logical {
+                    left_instructions,
+                    right_instructions,
+                    ..
+                } => {
+                    Self::analyze_scoped(left_instructions, state)?;
+                    Self::analyze_scoped(right_instructions, state)?;
+                }
+            }
+        }
+
         Ok(())
     }
 }

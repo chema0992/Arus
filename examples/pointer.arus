@@ -2,11 +2,11 @@ main
 
 fn main() {
     let value: i32 = 10
-    let p: i32 rw* = &value
-    let p2: i32 r* = &value
-    
-    *p = 50
-    println(*p)
 
+    if true {
+        let p: i32 rw* = &value
+    }
+    
+    let q: i32 rw* = &value
     return 0
 }
